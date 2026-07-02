@@ -16,12 +16,16 @@ PACKAGING     := $(CURDIR)/debian/packaging
 %:
 	dh $@
 
-# There is no upstream build system to configure.
+# There is no upstream build system to configure or compile.
 override_dh_auto_configure:
 
-# Stage all files into debian/tmp/ for dh_install to split into packages.
-# Everything comes from the unpacked orig tarball; nothing is downloaded here.
 override_dh_auto_build:
+
+# Stage all files into debian/tmp/ for dh_install to split into packages.
+# This runs after dh_prep (which wipes debian/tmp), so files survive into
+# the dh_install step. Everything comes from the unpacked orig tarball;
+# nothing is downloaded here.
+override_dh_auto_install:
 	# --- injector ---
 	install -d $(CURDIR)/debian/tmp/usr/lib/opentelemetry/injector
 	install -m 0755 \
@@ -55,7 +59,7 @@ override_dh_auto_build:
 	cp -a $(ORIG_UPSTREAM)/dotnet/net \
 	      $(CURDIR)/debian/tmp/usr/lib/opentelemetry/dotnet/net
 
-	# --- config files and conf.d drop-ins (from packaging/ in orig) ---
+	# --- config files and conf.d drop-ins ---
 	install -d $(CURDIR)/debian/tmp/etc/opentelemetry/injector/conf.d
 	install -d $(CURDIR)/debian/tmp/etc/opentelemetry/java
 	install -d $(CURDIR)/debian/tmp/etc/opentelemetry/nodejs
@@ -92,6 +96,12 @@ override_dh_auto_build:
 # There are no in-tree unit tests; testing is done via DEP-8 autopkgtests.
 override_dh_auto_test:
 
-# dh_auto_clean would normally run "make clean".  There is no Makefile.
-override_dh_auto_clean:
-	rm -rf $(CURDIR)/debian/tmp
+# All .so files are pre-built upstream binaries.  dh_strip would try to
+# extract and repackage debug symbols; dh_shlibdeps would try to resolve
+# shared-library dependencies including libc.musl-* which is not present
+# on the glibc build host.  Exclude all .so files from both steps.
+override_dh_strip:
+	dh_strip -Xopentelemetry
+
+override_dh_shlibdeps:
+	dh_shlibdeps -Xopentelemetry

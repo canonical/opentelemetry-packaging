@@ -41,10 +41,6 @@ Provides:
 Suggests:
  opentelemetry-injector1,
  default-jre,
-Conflicts:
- opentelemetry-java-autoinstrumentation1,
-Replaces:
- opentelemetry-java-autoinstrumentation1,
 Description: OpenTelemetry Java Auto-Instrumentation Agent
  Packages the pre-built OpenTelemetry Java agent JAR from the upstream
  opentelemetry-java-instrumentation project.
@@ -63,10 +59,6 @@ Provides:
  opentelemetry-nodejs-autoinstrumentation1,
 Suggests:
  opentelemetry-injector1,
-Conflicts:
- opentelemetry-nodejs-autoinstrumentation1,
-Replaces:
- opentelemetry-nodejs-autoinstrumentation1,
 Description: OpenTelemetry Node.js Auto-Instrumentation
  Packages the pre-built @opentelemetry/auto-instrumentations-node npm bundle
  from the upstream opentelemetry-js project.
@@ -84,10 +76,6 @@ Provides:
  opentelemetry-dotnet-autoinstrumentation1,
 Suggests:
  opentelemetry-injector1,
-Conflicts:
- opentelemetry-dotnet-autoinstrumentation1,
-Replaces:
- opentelemetry-dotnet-autoinstrumentation1,
 Description: OpenTelemetry .NET Automatic Instrumentation
  Packages the pre-built OpenTelemetry .NET Automatic Instrumentation binaries
  for both glibc and musl libc flavours.
