@@ -49,6 +49,14 @@ debian/                  Standard Debian packaging metadata
 
 .github/workflows/
   build-and-upload.yml   CI: build source package, sign, dput to Launchpad
+
+docs/adr/                Architecture Decision Records
+  001-ppa-first-universe-later.md
+  002-source-package-name.md
+  003-debian-toolchain-not-nfpm.md
+  004-quilt-format-pinned-orig.md
+  005-bundle-nodejs-node-modules.md
+  006-dep8-autopkgtests.md
 ```
 
 The `upstream/` directory (the unpacked orig tarball contents) is never
