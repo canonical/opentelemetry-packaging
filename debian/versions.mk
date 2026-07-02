@@ -2,7 +2,7 @@
 #
 # To upgrade a component:
 #   1. Update the version here.
-#   2. Run scripts/get-orig-source.sh to download the new artifacts and
+#   2. Run debian/scripts/get-orig-source.sh to download the new artifacts and
 #      regenerate opentelemetry_<SUITE_VERSION>.orig.tar.gz.
 #   3. Bump the Debian revision in debian/changelog (e.g. -0ubuntu1 ->
 #      -0ubuntu2), or bump SUITE_VERSION if this is a new upstream release.

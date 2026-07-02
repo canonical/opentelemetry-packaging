@@ -33,17 +33,15 @@
 #           OpenTelemetry.AutoInstrumentation.Native.so
 #         net/
 #           (shared managed assemblies)
-#     packaging/
-#       (config files, lifecycle scripts — our own content)
 #
 # Usage:
-#   scripts/get-orig-source.sh
+#   debian/scripts/get-orig-source.sh
 #
 # Required tools: curl, jq, unzip (all available on Ubuntu Noble)
 
 set -eu
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
 # ---------------------------------------------------------------------------
 # Load pinned versions from versions.mk

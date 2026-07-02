@@ -18,7 +18,7 @@ Produces packages that can be distributed via a Launchpad PPA or
 ## Installing from the PPA
 
 ```sh
-sudo add-apt-repository ppa:observability/opentelemetry
+sudo add-apt-repository ppa:TODO-team/opentelemetry
 sudo apt update
 sudo apt install opentelemetry
 ```
@@ -143,16 +143,24 @@ Expected output:
 
 ### 4. Inspect a package before installing
 
-`debc` lists every file the package will install:
+`dpkg-deb -c` lists every file the package will install:
 
 ```sh
-debc ../opentelemetry-injector_0.1.0-0ubuntu1_amd64.deb
+dpkg-deb -c ../opentelemetry-injector_0.1.0-0ubuntu1_amd64.deb
 ```
 
-`dpkg-deb --info` shows the metadata (version, Provides, Depends, etc.):
+`dpkg-deb -I` shows the package metadata (version, Provides, Depends, etc.):
 
 ```sh
-dpkg-deb --info ../opentelemetry-injector_0.1.0-0ubuntu1_amd64.deb
+dpkg-deb -I ../opentelemetry-injector_0.1.0-0ubuntu1_amd64.deb
+```
+
+Alternatively, `debc` (from `devscripts`) can show all packages from the last
+build at once — run it without arguments from inside the source tree after
+`dpkg-buildpackage` completes:
+
+```sh
+debc
 ```
 
 ### 5. Install the packages locally
@@ -164,7 +172,7 @@ Create a minimal local APT repository instead:
 ```sh
 mkdir -p /tmp/otel-local-repo
 cp ../*.deb /tmp/otel-local-repo/
-cd /tmp/otel-local-repo && dpkg-scanpackages . | gzip -c > Packages.gz
+dpkg-scanpackages /tmp/otel-local-repo | gzip -c > /tmp/otel-local-repo/Packages.gz
 
 echo "deb [trusted=yes] file:///tmp/otel-local-repo ./" \
   | sudo tee /etc/apt/sources.list.d/otel-local.list
