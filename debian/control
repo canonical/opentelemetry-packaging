@@ -1,4 +1,4 @@
-Source: opentelemetry-packaging
+Source: opentelemetry
 Section: utils
 Priority: optional
 Maintainer: Canonical Observability <observability@lists.launchpad.net>
