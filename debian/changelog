@@ -1,0 +1,12 @@
+opentelemetry-packaging (0.1.0) noble; urgency=medium
+
+  * Initial packaging of the OpenTelemetry auto-instrumentation suite for
+    Ubuntu Noble (24.04 LTS).
+  * Packages the OpenTelemetry LD_PRELOAD injector, Java agent, Node.js
+    auto-instrumentation, .NET Automatic Instrumentation, and a metapackage.
+  * Upstream artifacts are fetched from GitHub releases at build time.
+  * Implements the metapackage architecture (virtual interface-versioned
+    Provides, vendor-swappable language packages) as designed in
+    https://github.com/open-telemetry/opentelemetry-packaging/pull/10.
+
+ -- Canonical Observability <observability@lists.launchpad.net>  Thu, 02 Jul 2026 16:52:30 -0400

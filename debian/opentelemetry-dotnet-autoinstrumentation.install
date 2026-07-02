@@ -1,0 +1,3 @@
+usr/lib/opentelemetry/dotnet/*
+etc/opentelemetry/injector/conf.d/dotnet.conf
+etc/opentelemetry/dotnet/otel-sdk-config.yaml

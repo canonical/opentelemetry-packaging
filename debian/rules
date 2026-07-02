@@ -1,0 +1,60 @@
+#!/usr/bin/make -f
+# Copyright 2026 Canonical Ltd.
+# SPDX-License-Identifier: Apache-2.0
+
+# Uncomment to see every command that modifies files on the build system.
+#export DH_VERBOSE = 1
+
+# DEB_HOST_ARCH is set by dpkg-architecture; passed to the fetch script so
+# it downloads the correct architecture-specific binaries (amd64 / arm64).
+include /usr/share/dpkg/architecture.mk
+
+%:
+	dh $@
+
+# There is no upstream build system to configure.
+override_dh_auto_configure:
+
+# Fetch upstream pre-built artifacts into debian/tmp/.
+# The fetch script queries the GitHub Releases API for the latest release of
+# each upstream component and downloads the appropriate artefact for the
+# current target architecture.
+override_dh_auto_build:
+	DEB_HOST_ARCH=$(DEB_HOST_ARCH) \
+	STAGING_DIR=$(CURDIR)/debian/tmp \
+	$(CURDIR)/scripts/fetch-artifacts.sh
+	# Install conf.d drop-ins and SDK config templates from packaging/common/
+	# into the staging tree so dh_install can pick them up.
+	install -d $(CURDIR)/debian/tmp/etc/opentelemetry/injector/conf.d
+	install -d $(CURDIR)/debian/tmp/etc/opentelemetry/java
+	install -d $(CURDIR)/debian/tmp/etc/opentelemetry/nodejs
+	install -d $(CURDIR)/debian/tmp/etc/opentelemetry/dotnet
+	install -m 0644 $(CURDIR)/packaging/common/injector/injector.conf \
+	    $(CURDIR)/debian/tmp/etc/opentelemetry/injector/injector.conf
+	install -m 0644 $(CURDIR)/packaging/common/injector/default_env.conf \
+	    $(CURDIR)/debian/tmp/etc/opentelemetry/injector/default_env.conf
+	install -m 0644 $(CURDIR)/packaging/common/java/injector.conf \
+	    $(CURDIR)/debian/tmp/etc/opentelemetry/injector/conf.d/java.conf
+	install -m 0644 $(CURDIR)/packaging/common/java/otel-sdk-config.yaml \
+	    $(CURDIR)/debian/tmp/etc/opentelemetry/java/otel-sdk-config.yaml
+	install -m 0644 $(CURDIR)/packaging/common/nodejs/injector.conf \
+	    $(CURDIR)/debian/tmp/etc/opentelemetry/injector/conf.d/nodejs.conf
+	install -m 0644 $(CURDIR)/packaging/common/nodejs/otel-sdk-config.yaml \
+	    $(CURDIR)/debian/tmp/etc/opentelemetry/nodejs/otel-sdk-config.yaml
+	install -m 0644 $(CURDIR)/packaging/common/dotnet/injector.conf \
+	    $(CURDIR)/debian/tmp/etc/opentelemetry/injector/conf.d/dotnet.conf
+	install -m 0644 $(CURDIR)/packaging/common/dotnet/otel-sdk-config.yaml \
+	    $(CURDIR)/debian/tmp/etc/opentelemetry/dotnet/otel-sdk-config.yaml
+	# Install injector lifecycle scripts into /usr/share so postinst/prerm can call them.
+	install -d $(CURDIR)/debian/tmp/usr/share/opentelemetry-injector
+	install -m 0755 $(CURDIR)/packaging/common/scripts/postinstall-injector.sh \
+	    $(CURDIR)/debian/tmp/usr/share/opentelemetry-injector/postinstall-injector.sh
+	install -m 0755 $(CURDIR)/packaging/common/scripts/preuninstall-injector.sh \
+	    $(CURDIR)/debian/tmp/usr/share/opentelemetry-injector/preuninstall-injector.sh
+
+# There are no in-tree unit tests; testing is done via DEP-8 autopkgtests.
+override_dh_auto_test:
+
+# dh_auto_clean would normally run "make clean".  There is no Makefile.
+override_dh_auto_clean:
+	rm -rf $(CURDIR)/debian/tmp

@@ -1,0 +1,23 @@
+# OpenTelemetry Node.js SDK declarative configuration
+# /etc/opentelemetry/nodejs/otel-sdk-config.yaml
+#
+# This file is preserved on package upgrades (dpkg conffile).
+# See https://opentelemetry.io/docs/languages/js/configuration/
+# for the full configuration reference.
+#
+# Uncomment and edit the sections you need.
+
+# file_format: "0.4"
+#
+# resource:
+#   attributes:
+#     - name: service.name
+#       value: my-service
+#
+# tracer_provider:
+#   exporters:
+#     - otlp
+#
+# exporter:
+#   otlp:
+#     endpoint: http://localhost:4317

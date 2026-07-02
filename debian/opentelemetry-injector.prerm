@@ -1,0 +1,15 @@
+#!/bin/sh
+# Copyright 2026 Canonical Ltd.
+# SPDX-License-Identifier: Apache-2.0
+#
+# prerm — runs before opentelemetry-injector is removed or upgraded away.
+
+set -e
+
+case "$1" in
+    remove|upgrade|deconfigure)
+        /usr/share/opentelemetry-injector/preuninstall-injector.sh
+        ;;
+esac
+
+#DEBHELPER#

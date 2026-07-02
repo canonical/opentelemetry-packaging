@@ -1,0 +1,3 @@
+usr/lib/opentelemetry/java/opentelemetry-javaagent.jar
+etc/opentelemetry/injector/conf.d/java.conf
+etc/opentelemetry/java/otel-sdk-config.yaml

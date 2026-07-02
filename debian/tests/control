@@ -1,0 +1,62 @@
+# DEP-8 autopkgtest control file
+# https://salsa.debian.org/ci-team/autopkgtest/-/blob/main/doc/README.package-tests.rst
+#
+# Tests are run by Launchpad after a successful build.
+# Test-Command: runs an inline shell command; no separate test script file needed.
+# "@" in Depends is replaced with all binary packages from this source package.
+
+# ---------------------------------------------------------------------------
+# opentelemetry-injector
+# ---------------------------------------------------------------------------
+
+Test-Command: test -f /usr/lib/opentelemetry/injector/libotelinject.so && test -f /etc/opentelemetry/injector/injector.conf && test -f /etc/opentelemetry/injector/default_env.conf && test -d /etc/opentelemetry/injector/conf.d
+Depends: opentelemetry-injector
+
+Test-Command: grep -q /usr/lib/opentelemetry/injector/libotelinject.so /etc/ld.so.preload
+Depends: opentelemetry-injector
+
+Test-Command: objdump -f /usr/lib/opentelemetry/injector/libotelinject.so
+Depends: opentelemetry-injector, binutils
+
+# ---------------------------------------------------------------------------
+# opentelemetry-java-autoinstrumentation
+# ---------------------------------------------------------------------------
+
+Test-Command: test -f /usr/lib/opentelemetry/java/opentelemetry-javaagent.jar && test -f /etc/opentelemetry/injector/conf.d/java.conf && test -f /etc/opentelemetry/java/otel-sdk-config.yaml
+Depends: opentelemetry-java-autoinstrumentation
+
+Test-Command: file /usr/lib/opentelemetry/java/opentelemetry-javaagent.jar | grep -q "Java archive"
+Depends: opentelemetry-java-autoinstrumentation, file
+
+Test-Command: grep -q opentelemetry-javaagent.jar /etc/opentelemetry/injector/conf.d/java.conf
+Depends: opentelemetry-java-autoinstrumentation
+
+# ---------------------------------------------------------------------------
+# opentelemetry-nodejs-autoinstrumentation
+# ---------------------------------------------------------------------------
+
+Test-Command: test -d /usr/lib/opentelemetry/nodejs/node_modules/@opentelemetry/auto-instrumentations-node && test -f /etc/opentelemetry/injector/conf.d/nodejs.conf && test -f /etc/opentelemetry/nodejs/otel-sdk-config.yaml
+Depends: opentelemetry-nodejs-autoinstrumentation
+
+Test-Command: ENTRY="$(grep nodejs_auto_instrumentation_agent_path /etc/opentelemetry/injector/conf.d/nodejs.conf | cut -d= -f2)"; test -n "$ENTRY" && test -f "$ENTRY"
+Depends: opentelemetry-nodejs-autoinstrumentation
+
+# ---------------------------------------------------------------------------
+# opentelemetry-dotnet-autoinstrumentation
+# ---------------------------------------------------------------------------
+
+Test-Command: test -d /usr/lib/opentelemetry/dotnet && test -f /etc/opentelemetry/injector/conf.d/dotnet.conf && test -f /etc/opentelemetry/dotnet/otel-sdk-config.yaml
+Depends: opentelemetry-dotnet-autoinstrumentation
+
+Test-Command: test -f /usr/lib/opentelemetry/dotnet/linux-x64/OpenTelemetry.AutoInstrumentation.Native.so || test -f /usr/lib/opentelemetry/dotnet/linux-arm64/OpenTelemetry.AutoInstrumentation.Native.so
+Depends: opentelemetry-dotnet-autoinstrumentation
+
+# ---------------------------------------------------------------------------
+# opentelemetry (metapackage)
+# ---------------------------------------------------------------------------
+
+Test-Command: dpkg -l opentelemetry-injector | grep -q '^ii'
+Depends: opentelemetry
+
+Test-Command: test -f /usr/share/doc/opentelemetry/README
+Depends: opentelemetry

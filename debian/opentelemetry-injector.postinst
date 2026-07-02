@@ -1,0 +1,15 @@
+#!/bin/sh
+# Copyright 2026 Canonical Ltd.
+# SPDX-License-Identifier: Apache-2.0
+#
+# postinst — runs after opentelemetry-injector is installed or upgraded.
+
+set -e
+
+case "$1" in
+    configure|abort-upgrade|abort-deconfigure|abort-remove)
+        /usr/share/opentelemetry-injector/postinstall-injector.sh
+        ;;
+esac
+
+#DEBHELPER#
