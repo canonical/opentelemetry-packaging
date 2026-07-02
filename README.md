@@ -44,6 +44,7 @@ packaging/common/        Config files, conf.d drop-ins, lifecycle scripts
 
 scripts/
   fetch-artifacts.sh     Downloads latest upstream releases at build time
+  make-orig-tarball.sh   Generates the orig tarball required by 3.0 (quilt)
 
 .github/workflows/
   build-and-upload.yml   CI: build source package, sign, dput to Launchpad
@@ -66,7 +67,24 @@ sudo apt install debhelper devscripts dpkg-dev curl jq unzip
 `unzip` is needed by the fetch script to unpack the .NET instrumentation zip.
 `curl` and `jq` fetch and parse the GitHub Releases API responses.
 
-### 1. Build the binary packages
+### 1. Generate the orig tarball
+
+This repository uses the `3.0 (quilt)` Debian source format, which requires an
+orig tarball — a snapshot of the non-`debian/` tree named
+`opentelemetry_<upstream-version>.orig.tar.gz` — to exist one directory above
+the repo root before building.
+
+The orig tarball does not live in git (it is a build artefact).
+Generate it with:
+
+```sh
+scripts/make-orig-tarball.sh
+```
+
+This only needs to be re-run when the upstream version in `debian/changelog`
+changes (i.e. when you bump the part before the `-`).
+
+### 3. Build the binary packages
 
 Run `dpkg-buildpackage` from the repository root.
 The `-us -uc` flags skip signing (not needed for local use).
@@ -95,29 +113,29 @@ ls ../*.deb
 You should see something like:
 
 ```
-../opentelemetry_0.1.0_all.deb
-../opentelemetry-injector_0.1.0_amd64.deb
-../opentelemetry-java-autoinstrumentation_0.1.0_all.deb
-../opentelemetry-nodejs-autoinstrumentation_0.1.0_all.deb
-../opentelemetry-dotnet-autoinstrumentation_0.1.0_amd64.deb
+../opentelemetry_0.1.0-0ubuntu1_all.deb
+../opentelemetry-injector_0.1.0-0ubuntu1_amd64.deb
+../opentelemetry-java-autoinstrumentation_0.1.0-0ubuntu1_all.deb
+../opentelemetry-nodejs-autoinstrumentation_0.1.0-0ubuntu1_all.deb
+../opentelemetry-dotnet-autoinstrumentation_0.1.0-0ubuntu1_amd64.deb
 ```
 
-### 2. Inspect a package before installing
+### 4. Inspect a package before installing
 
 `debc` lists every file that will be installed by each package:
 
 ```sh
-debc ../opentelemetry-injector_0.1.0_amd64.deb
+debc ../opentelemetry-injector_0.1.0-0ubuntu1_amd64.deb
 ```
 
 `dpkg-deb --info` shows the package metadata (version, dependencies,
 Provides, etc.):
 
 ```sh
-dpkg-deb --info ../opentelemetry-injector_0.1.0_amd64.deb
+dpkg-deb --info ../opentelemetry-injector_0.1.0-0ubuntu1_amd64.deb
 ```
 
-### 3. Install the packages locally
+### 5. Install the packages locally
 
 Create a minimal local APT repository from the built `.deb` files, then
 install from it.
@@ -147,7 +165,7 @@ To install a single package instead of the full suite:
 sudo apt install opentelemetry-injector
 ```
 
-### 4. Verify the installation
+### 6. Verify the installation
 
 Check that the injector `.so` is registered in `/etc/ld.so.preload`:
 
@@ -174,7 +192,7 @@ dpkg -s opentelemetry-injector
 dpkg -s opentelemetry
 ```
 
-### 5. Run the DEP-8 autopkgtests locally
+### 7. Run the DEP-8 autopkgtests locally
 
 Install `autopkgtest`:
 
@@ -197,7 +215,7 @@ use the `lxd` driver:
 sudo autopkgtest ../*.deb -- lxd ubuntu:noble
 ```
 
-### 6. Clean up
+### 8. Clean up
 
 Remove the local APT source and uninstall:
 
@@ -218,6 +236,12 @@ rm -f ../*.deb ../*.dsc ../*.tar.xz ../*.buildinfo ../*.changes
 ```
 
 ### Troubleshooting
+
+**`dpkg-source: error: aborting due to unexpected upstream changes`**
+The orig tarball is out of sync with the working tree.
+This happens whenever any non-`debian/` file is modified after the orig was
+last generated.
+Re-run `scripts/make-orig-tarball.sh` and then retry the build.
 
 **`fetch-artifacts.sh` fails with a 404 or rate-limit error.**
 GitHub's unauthenticated API is limited to 60 requests per hour.
@@ -243,6 +267,20 @@ Confirm the Packages index was regenerated after the latest build:
 cat /tmp/otel-local-repo/Packages.gz | zcat | grep -A5 "Package: opentelemetry-injector"
 ```
 
+## Versioning
+
+Package versions follow the Ubuntu convention `<upstream>-<debian>ubuntu<ubuntu>`:
+
+- `0.1.0` — the upstream version (our suite-level version, not tied to any
+  individual component release).
+- `-0` — the Debian revision; `0` because this package has never been in Debian.
+- `ubuntu1` — the Ubuntu packaging revision; incremented for each packaging-only
+  change within the same upstream version.
+
+So the first release is `0.1.0-0ubuntu1`.
+A packaging-only fix to that release would be `0.1.0-0ubuntu2`.
+A new upstream version would be `0.2.0-0ubuntu1`.
+
 ## Relationship to upstream
 
 This repository is a parallel Canonical implementation targeting the
@@ -257,12 +295,11 @@ repository (PR #10 and PR #18), which uses nfpm as its build tool.
 
 The following work is required before submitting to Ubuntu universe:
 
-- Switch source format to `3.0 (quilt)` with explicit orig tarballs
-  (no network fetch at build time on Ubuntu buildd infrastructure).
 - Full `debian/copyright` audit of all bundled Node.js modules and
   .NET managed assemblies.
 - Build all components from source (injector, Java agent, Node.js
-  bundle, .NET native library).
+  bundle, .NET native library) — network fetches are not permitted on
+  Ubuntu buildd infrastructure.
 - `lintian --pedantic` clean output.
 - NEW queue submission via a Debian Developer sponsor.
 

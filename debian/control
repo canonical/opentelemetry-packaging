@@ -1,7 +1,7 @@
 Source: opentelemetry
 Section: utils
 Priority: optional
-Maintainer: Canonical Observability <observability@lists.launchpad.net>
+Maintainer: Canonical Observability <TODO@canonical.com>
 Rules-Requires-Root: no
 Build-Depends:
  debhelper-compat (= 13),
