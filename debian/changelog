@@ -1,4 +1,4 @@
-opentelemetry (0.1.0-0ubuntu1) noble; urgency=low
+opentelemetry (0.1.0-0ubuntu1) noble; urgency=medium
 
   * Initial packaging of the OpenTelemetry auto-instrumentation suite for
     Ubuntu Noble (24.04 LTS).

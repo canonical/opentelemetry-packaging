@@ -28,89 +28,110 @@ sudo apt install opentelemetry
 ```
 debian/                  Standard Debian packaging metadata
   control                Source package + 5 binary package stanzas
-  rules                  dh build rules; fetches upstream artifacts at build time
+  rules                  dh build rules; copies from unpacked orig (no network)
+  versions.mk            Pinned upstream component versions
+  packaging/             Config files, conf.d drop-ins, lifecycle scripts
+    common/
+      injector/          injector.conf, default_env.conf
+      java/              java.conf (conf.d drop-in), otel-sdk-config.yaml
+      nodejs/            nodejs.conf (conf.d drop-in), otel-sdk-config.yaml
+      dotnet/            dotnet.conf (conf.d drop-in), otel-sdk-config.yaml
+      scripts/           postinstall-injector.sh, preuninstall-injector.sh
+  scripts/
+    get-orig-source.sh   Downloads pinned upstream releases, assembles orig tarball
   tests/control          DEP-8 autopkgtests run by Launchpad
   opentelemetry-injector.postinst   Appends libotelinject.so to /etc/ld.so.preload
   opentelemetry-injector.prerm      Removes libotelinject.so from /etc/ld.so.preload
   *.install              File-to-package mappings for dh_install
   *.conffiles            User-editable config files preserved on upgrade
-
-packaging/common/        Config files, conf.d drop-ins, lifecycle scripts
-  injector/              injector.conf, default_env.conf
-  java/                  java.conf (conf.d drop-in), otel-sdk-config.yaml
-  nodejs/                nodejs.conf (conf.d drop-in), otel-sdk-config.yaml
-  dotnet/                dotnet.conf (conf.d drop-in), otel-sdk-config.yaml
-  scripts/               postinstall-injector.sh, preuninstall-injector.sh
-
-scripts/
-  fetch-artifacts.sh     Downloads latest upstream releases at build time
-  make-orig-tarball.sh   Generates the orig tarball required by 3.0 (quilt)
+  source/options         extend-diff-ignore rules for upstream/ binary tree
+  source/lintian-overrides   Overrides for expected prebuilt-binary warnings
 
 .github/workflows/
   build-and-upload.yml   CI: build source package, sign, dput to Launchpad
 ```
 
+The `upstream/` directory (the unpacked orig tarball contents) is never
+committed to git — it is a build artefact produced by `get-orig-source.sh`
+and consumed by `debian/rules` at build time.
+
 ## Building and testing locally
 
 This section walks through a full local build and install cycle on Ubuntu Noble.
-You need an internet connection — the build fetches upstream release artifacts
-from GitHub at build time.
+
+### How it works
+
+This package uses the `3.0 (quilt)` Debian source format.
+The orig tarball (`opentelemetry_<version>.orig.tar.gz`) contains the real
+upstream binary artifacts — the injector `.so`, Java agent JAR, Node.js npm
+bundle, and .NET assemblies — downloaded at pinned versions from
+`debian/versions.mk`.
+The `debian/` layer (config files, build rules, maintainer scripts) sits on
+top of that.
+
+At build time `debian/rules` copies files from the unpacked orig into the
+package staging area.
+**No network access is required during the build itself.**
+Network access is only needed when generating the orig tarball
+(`debian/scripts/get-orig-source.sh`), which maintainers run locally before
+uploading to Launchpad.
 
 ### Prerequisites
-
-Install the build tools:
 
 ```sh
 sudo apt install debhelper devscripts dpkg-dev curl jq unzip
 ```
 
-`unzip` is needed by the fetch script to unpack the .NET instrumentation zip.
-`curl` and `jq` fetch and parse the GitHub Releases API responses.
+### 1. Pin the component versions
 
-### 1. Generate the orig tarball
+Open `debian/versions.mk` and check the pinned versions.
+To upgrade a component, update its version line and re-run step 2.
 
-This repository uses the `3.0 (quilt)` Debian source format, which requires an
-orig tarball — a snapshot of the non-`debian/` tree named
-`opentelemetry_<upstream-version>.orig.tar.gz` — to exist one directory above
-the repo root before building.
-
-The orig tarball does not live in git (it is a build artefact).
-Generate it with:
-
-```sh
-scripts/make-orig-tarball.sh
+```
+INJECTOR_VERSION := 0.9.0
+JAVA_VERSION     := 2.29.0
+NODEJS_VERSION   := 0.77.0
+DOTNET_VERSION   := 1.15.0
 ```
 
-This only needs to be re-run when the upstream version in `debian/changelog`
-changes (i.e. when you bump the part before the `-`).
+### 2. Generate the orig tarball
+
+This downloads the pinned upstream artifacts and assembles
+`opentelemetry_<SUITE_VERSION>.orig.tar.gz` one directory above the repo root.
+It needs to be run once per version, or whenever you change a version in
+`debian/versions.mk`.
+
+```sh
+debian/scripts/get-orig-source.sh
+```
+
+The script downloads:
+- `libotelinject_amd64.so` and `libotelinject_arm64.so` from the injector releases
+- `opentelemetry-javaagent.jar` from the Java instrumentation releases
+- `auto-instrumentations-node-<version>.tgz` from the npm registry
+- Four .NET zips (glibc/musl × amd64/arm64) from the dotnet-instrumentation releases
+
+The resulting tarball contains only an `upstream/` directory with these artifacts.
+It is not committed to git.
 
 ### 3. Build the binary packages
 
-Run `dpkg-buildpackage` from the repository root.
-The `-us -uc` flags skip signing (not needed for local use).
+No network access is needed from this point on.
 
 ```sh
 dpkg-buildpackage -us -uc
 ```
 
-This will:
-1. Call `scripts/fetch-artifacts.sh` to download the latest upstream releases
-   (injector `.so`, Java agent JAR, Node.js bundle, .NET binaries).
-2. Stage everything under `debian/tmp/`.
-3. Run `dh_install` to split the staged files into the five binary packages.
-4. Produce `.deb` files one directory above the repo root.
+`debian/rules` copies files from the unpacked `upstream/` tree into
+`debian/tmp/`, then `dh_install` splits them into the five binary packages.
 
-The first run takes a couple of minutes depending on network speed.
-Subsequent builds reuse nothing — `debian/tmp/` is always wiped — so
-artifacts are always at the latest upstream release.
-
-Once done, list what was built:
+Once done:
 
 ```sh
 ls ../*.deb
 ```
 
-You should see something like:
+Expected output:
 
 ```
 ../opentelemetry_0.1.0-0ubuntu1_all.deb
@@ -122,14 +143,13 @@ You should see something like:
 
 ### 4. Inspect a package before installing
 
-`debc` lists every file that will be installed by each package:
+`debc` lists every file the package will install:
 
 ```sh
 debc ../opentelemetry-injector_0.1.0-0ubuntu1_amd64.deb
 ```
 
-`dpkg-deb --info` shows the package metadata (version, dependencies,
-Provides, etc.):
+`dpkg-deb --info` shows the metadata (version, Provides, Depends, etc.):
 
 ```sh
 dpkg-deb --info ../opentelemetry-injector_0.1.0-0ubuntu1_amd64.deb
@@ -137,21 +157,15 @@ dpkg-deb --info ../opentelemetry-injector_0.1.0-0ubuntu1_amd64.deb
 
 ### 5. Install the packages locally
 
-Create a minimal local APT repository from the built `.deb` files, then
-install from it.
-This is the recommended approach because `dpkg -i` does not resolve
-inter-package dependencies (the metapackage depends on `opentelemetry-injector1`,
-which is a virtual package that must be found in an APT index).
+A plain `dpkg -i` won't resolve virtual package dependencies
+(`opentelemetry-injector1` etc.).
+Create a minimal local APT repository instead:
 
 ```sh
-# Create the local repo directory and index it.
 mkdir -p /tmp/otel-local-repo
 cp ../*.deb /tmp/otel-local-repo/
-cd /tmp/otel-local-repo
-dpkg-scanpackages . | gzip -c > Packages.gz
+cd /tmp/otel-local-repo && dpkg-scanpackages . | gzip -c > Packages.gz
 
-# Add it as an APT source (pinned to local so it overrides nothing from
-# Ubuntu's own repositories).
 echo "deb [trusted=yes] file:///tmp/otel-local-repo ./" \
   | sudo tee /etc/apt/sources.list.d/otel-local.list
 
@@ -159,65 +173,34 @@ sudo apt update
 sudo apt install opentelemetry
 ```
 
-To install a single package instead of the full suite:
-
-```sh
-sudo apt install opentelemetry-injector
-```
-
 ### 6. Verify the installation
-
-Check that the injector `.so` is registered in `/etc/ld.so.preload`:
 
 ```sh
 grep libotelinject /etc/ld.so.preload
-```
-
-Check the conf.d drop-ins installed by the language packages:
-
-```sh
 ls /etc/opentelemetry/injector/conf.d/
-```
-
-Check the declarative config templates:
-
-```sh
-ls /etc/opentelemetry/
-```
-
-Verify that `dpkg` records the correct metadata (Provides, Depends, etc.):
-
-```sh
 dpkg -s opentelemetry-injector
 dpkg -s opentelemetry
 ```
 
 ### 7. Run the DEP-8 autopkgtests locally
 
-Install `autopkgtest`:
-
 ```sh
 sudo apt install autopkgtest
 ```
 
-Run the tests using the `null` virtualisation driver (runs directly on your
-machine, no VM or container needed — only use this on a throwaway system or
-VM since the tests install packages):
+On the host directly (use only on a throwaway VM):
 
 ```sh
 sudo autopkgtest ../*.deb -- null
 ```
 
-Or, if you have a spare LXD container or VM and want an isolated environment,
-use the `lxd` driver:
+In an isolated LXD container:
 
 ```sh
 sudo autopkgtest ../*.deb -- lxd ubuntu:noble
 ```
 
 ### 8. Clean up
-
-Remove the local APT source and uninstall:
 
 ```sh
 sudo apt remove opentelemetry opentelemetry-injector \
@@ -226,45 +209,35 @@ sudo apt remove opentelemetry opentelemetry-injector \
   opentelemetry-dotnet-autoinstrumentation
 sudo rm /etc/apt/sources.list.d/otel-local.list
 sudo apt update
+rm -f ../*.deb ../*.dsc ../*.tar.* ../*.buildinfo ../*.changes
 ```
 
-Remove the built packages:
+### Upgrading a component version
 
-```sh
-cd /path/to/repo
-rm -f ../*.deb ../*.dsc ../*.tar.xz ../*.buildinfo ../*.changes
-```
+1. Update the version in `debian/versions.mk`.
+2. Run `debian/scripts/get-orig-source.sh` to download the new artifacts.
+3. Bump `SUITE_VERSION` in `debian/versions.mk` if this is a new suite release,
+   or just the Ubuntu revision in `debian/changelog`
+   (e.g. `0.1.0-0ubuntu1` → `0.1.0-0ubuntu2`) for a packaging-only change.
+4. Add a `debian/changelog` entry with `dch`.
+5. Rebuild with `dpkg-buildpackage -us -uc`.
 
 ### Troubleshooting
 
 **`dpkg-source: error: aborting due to unexpected upstream changes`**
 The orig tarball is out of sync with the working tree.
-This happens whenever any non-`debian/` file is modified after the orig was
-last generated.
-Re-run `scripts/make-orig-tarball.sh` and then retry the build.
-
-**`fetch-artifacts.sh` fails with a 404 or rate-limit error.**
-GitHub's unauthenticated API is limited to 60 requests per hour.
-Set a personal access token to raise the limit:
-
-```sh
-GITHUB_TOKEN=ghp_yourtoken dpkg-buildpackage -us -uc
-```
-
-Then add token support to `scripts/fetch-artifacts.sh` by passing
-`--header "Authorization: Bearer $GITHUB_TOKEN"` to the `curl` calls.
+Re-run `debian/scripts/get-orig-source.sh` and retry.
 
 **`apt install opentelemetry` says "Unable to locate package".**
 Re-run `dpkg-scanpackages` and `sudo apt update` — the local repo index
-may be stale if you rebuilt the packages.
+may be stale.
 
 **The metapackage installs but `opentelemetry-injector1` is unsatisfied.**
-This means the `Provides: opentelemetry-injector1` field in
-`opentelemetry-injector` was not picked up by APT.
-Confirm the Packages index was regenerated after the latest build:
+The `Provides` field was not picked up by APT.
+Confirm the index was regenerated:
 
 ```sh
-cat /tmp/otel-local-repo/Packages.gz | zcat | grep -A5 "Package: opentelemetry-injector"
+zcat /tmp/otel-local-repo/Packages.gz | grep -A5 "Package: opentelemetry-injector"
 ```
 
 ## Versioning
