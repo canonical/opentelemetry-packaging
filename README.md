@@ -122,7 +122,16 @@ The script downloads:
 The resulting tarball contains only an `upstream/` directory with these artifacts.
 It is not committed to git.
 
-### 3. Build the binary packages
+### 3. Unpack the orig tarball
+
+The build expects the `upstream/` directory from the orig tarball to be present
+in the working tree. Extract it with:
+
+```sh
+tar -xzf ../opentelemetry_0.1.0.orig.tar.gz --strip-components=1 --wildcards '*/upstream'
+```
+
+### 4. Build the binary packages
 
 No network access is needed from this point on.
 
@@ -149,7 +158,7 @@ Expected output:
 ../opentelemetry-dotnet-autoinstrumentation_0.1.0-0ubuntu1_amd64.deb
 ```
 
-### 4. Inspect a package before installing
+### 5. Inspect a package before installing
 
 `dpkg-deb -c` lists every file the package will install:
 
@@ -171,7 +180,7 @@ build at once — run it without arguments from inside the source tree after
 debc
 ```
 
-### 5. Install the packages locally
+### 6. Install the packages locally
 
 A plain `dpkg -i` won't resolve virtual package dependencies
 (`opentelemetry-injector1` etc.).
@@ -180,7 +189,7 @@ Create a minimal local APT repository instead:
 ```sh
 mkdir -p /tmp/otel-local-repo
 cp ../*.deb /tmp/otel-local-repo/
-dpkg-scanpackages /tmp/otel-local-repo | gzip -c > /tmp/otel-local-repo/Packages.gz
+(cd /tmp/otel-local-repo && dpkg-scanpackages . | gzip -c > Packages.gz)
 
 echo "deb [trusted=yes] file:///tmp/otel-local-repo ./" \
   | sudo tee /etc/apt/sources.list.d/otel-local.list
@@ -189,7 +198,7 @@ sudo apt update
 sudo apt install opentelemetry
 ```
 
-### 6. Verify the installation
+### 7. Verify the installation
 
 ```sh
 grep libotelinject /etc/ld.so.preload
@@ -198,7 +207,7 @@ dpkg -s opentelemetry-injector
 dpkg -s opentelemetry
 ```
 
-### 7. Run the DEP-8 autopkgtests locally
+### 8. Run the DEP-8 autopkgtests locally
 
 ```sh
 sudo apt install autopkgtest
@@ -216,7 +225,7 @@ In an isolated LXD container:
 sudo autopkgtest ../*.deb -- lxd ubuntu:noble
 ```
 
-### 8. Clean up
+### 9. Clean up
 
 ```sh
 sudo apt remove opentelemetry opentelemetry-injector \
