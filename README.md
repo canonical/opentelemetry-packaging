@@ -1,7 +1,7 @@
 # opentelemetry
 
 Debian packaging for the OpenTelemetry auto-instrumentation suite,
-targeting Ubuntu Noble (24.04 LTS).
+targeting Ubuntu Stonking (26.10).
 Produces packages that can be distributed via a Launchpad PPA or
 (after a full license audit and source build) Ubuntu universe.
 
@@ -57,6 +57,7 @@ docs/adr/                Architecture Decision Records
   004-quilt-format-pinned-orig.md
   005-bundle-nodejs-node-modules.md
   006-dep8-autopkgtests.md
+  007-build-injector-from-source.md
 ```
 
 The `upstream/` directory (the unpacked orig tarball contents) is never
@@ -65,24 +66,32 @@ and consumed by `debian/rules` at build time.
 
 ## Building and testing locally
 
-This section walks through a full local build and install cycle on Ubuntu Noble.
+This section walks through a full local build and install cycle.
 
 ### How it works
 
 This package uses the `3.0 (quilt)` Debian source format.
-The orig tarball (`opentelemetry_<version>.orig.tar.gz`) contains the real
-upstream binary artifacts — the injector `.so`, Java agent JAR, Node.js npm
-bundle, and .NET assemblies — downloaded at pinned versions from
-`debian/versions.mk`.
+The orig tarball (`opentelemetry_<version>.orig.tar.gz`) contains upstream
+artifacts downloaded at pinned versions from `debian/versions.mk`:
+
+- **Injector**: Source code (built from source using Zig during package build)
+- **Java agent**: Pre-built JAR
+- **Node.js**: Pre-built npm bundle
+- **.NET**: Pre-built assemblies
+
 The `debian/` layer (config files, build rules, maintainer scripts) sits on
 top of that.
 
-At build time `debian/rules` copies files from the unpacked orig into the
-package staging area.
+At build time `debian/rules` builds the injector from source and copies
+the other artifacts from the unpacked orig into the package staging area.
 **No network access is required during the build itself.**
 Network access is only needed when generating the orig tarball
 (`debian/scripts/get-orig-source.sh`), which maintainers run locally before
 uploading to Launchpad.
+
+**Note:** Building the injector from source requires Zig >= 0.14, which is
+available in Ubuntu 26.10 (Stonking) but not in earlier releases. See ADR-007
+for details.
 
 ### Prerequisites
 
@@ -114,33 +123,80 @@ debian/scripts/get-orig-source.sh
 ```
 
 The script downloads:
-- `libotelinject_amd64.so` and `libotelinject_arm64.so` from the injector releases
+- Source tarball for the injector (built from source during package build)
 - `opentelemetry-javaagent.jar` from the Java instrumentation releases
 - `auto-instrumentations-node-<version>.tgz` from the npm registry
 - Four .NET zips (glibc/musl × amd64/arm64) from the dotnet-instrumentation releases
 
-The resulting tarball contains only an `upstream/` directory with these artifacts.
+The resulting tarball contains an `upstream/` directory with the injector
+source tree and pre-built artifacts for other components.
 It is not committed to git.
 
-### 3. Unpack the orig tarball
+### 3. Build with sbuild (recommended)
 
-The build expects the `upstream/` directory from the orig tarball to be present
-in the working tree. Extract it with:
+sbuild builds packages in a clean chroot, ensuring all build dependencies
+are correctly declared. This is the recommended method and closely matches
+how Launchpad builds packages.
+
+#### One-time setup: create a stonking chroot
+
+```sh
+sudo apt install sbuild schroot debootstrap
+sudo sbuild-createchroot \
+    --include=eatmydata \
+    stonking \
+    /srv/chroot/stonking-amd64 \
+    http://archive.ubuntu.com/ubuntu
+sudo sbuild-adduser $USER
+# Log out and back in for group membership to take effect
+```
+
+The chroot is created with only the `main` component. Zig is in `universe`,
+so you need to enable it:
+
+```sh
+sudo sbuild-shell stonking-amd64-sbuild
+```
+
+Inside the chroot:
+
+```sh
+echo "deb http://archive.ubuntu.com/ubuntu stonking universe" >> /etc/apt/sources.list
+apt update
+exit
+```
+
+#### Build the package
+
+```sh
+sbuild -d stonking -c stonking-amd64-sbuild --no-clean-source --no-run-lintian
+```
+
+The `--no-clean-source` flag preserves the source tree for debugging if the
+build fails. Built packages appear in the current directory.
+
+The `--no-run-lintian` flag skips lintian checks. We will fix these later.
+
+### 4. Alternative: build with dpkg-buildpackage
+
+If you have Zig >= 0.14 installed locally (e.g., on Ubuntu 26.10), you can
+build directly without sbuild.
+
+First, unpack the orig tarball:
 
 ```sh
 tar -xzf ../opentelemetry_0.1.0.orig.tar.gz --strip-components=1 --wildcards '*/upstream'
 ```
 
-### 4. Build the binary packages
-
-No network access is needed from this point on.
+Then build:
 
 ```sh
 dpkg-buildpackage -us -uc
 ```
 
-`debian/rules` copies files from the unpacked `upstream/` tree into
-`debian/tmp/`, then `dh_install` splits them into the five binary packages.
+`debian/rules` builds the injector from source, copies other artifacts from
+the unpacked `upstream/` tree into `debian/tmp/`, then `dh_install` splits
+them into the five binary packages.
 
 Once done:
 
@@ -222,7 +278,7 @@ sudo autopkgtest ../*.deb -- null
 In an isolated LXD container:
 
 ```sh
-sudo autopkgtest ../*.deb -- lxd ubuntu:noble
+sudo autopkgtest ../*.deb -- lxd ubuntu:stonking
 ```
 
 ### 9. Clean up
@@ -300,9 +356,9 @@ The following work is required before submitting to Ubuntu universe:
 
 - Full `debian/copyright` audit of all bundled Node.js modules and
   .NET managed assemblies.
-- Build all components from source (injector, Java agent, Node.js
-  bundle, .NET native library) — network fetches are not permitted on
-  Ubuntu buildd infrastructure.
+- Build remaining components from source (Java agent, Node.js bundle,
+  .NET native library) — the injector is already built from source
+  (see ADR-007).
 - `lintian --pedantic` clean output.
 - NEW queue submission via a Debian Developer sponsor.
 

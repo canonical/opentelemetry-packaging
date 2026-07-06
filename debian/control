@@ -7,13 +7,15 @@ Build-Depends:
  debhelper-compat (= 13),
  curl,
  jq,
+ make,
+ zig0.15,
 Standards-Version: 4.6.2
 Homepage: https://github.com/canonical/opentelemetry-packaging
 Vcs-Browser: https://github.com/canonical/opentelemetry-packaging
 Vcs-Git: https://github.com/canonical/opentelemetry-packaging.git
 
 Package: opentelemetry-injector
-Architecture: amd64 arm64
+Architecture: amd64
 Depends:
  ${misc:Depends},
 Provides:

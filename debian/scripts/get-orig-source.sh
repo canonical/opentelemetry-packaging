@@ -16,8 +16,12 @@
 #   opentelemetry-<SUITE_VERSION>/
 #     upstream/
 #       injector/
-#         libotelinject_amd64.so
-#         libotelinject_arm64.so
+#         (source tree extracted from GitHub source tarball v<version>)
+#         build.zig
+#         build.zig.zon
+#         Makefile
+#         src/
+#         ...
 #       java/
 #         opentelemetry-javaagent.jar
 #       nodejs/
@@ -92,17 +96,21 @@ mkdir -p \
     "$UPSTREAM/dotnet"
 
 # ---------------------------------------------------------------------------
-# 1. Injector — individual .so per arch
+# 1. Injector — source tarball (built from source during package build)
 # ---------------------------------------------------------------------------
 
-printf '\n=== opentelemetry-injector %s ===\n' "$INJECTOR_VERSION"
+printf '\n=== opentelemetry-injector %s (source) ===\n' "$INJECTOR_VERSION"
 
-for ARCH in amd64 arm64; do
-    ASSET="libotelinject_${ARCH}.so"
-    URL="https://github.com/open-telemetry/opentelemetry-injector/releases/download/v${INJECTOR_VERSION}/${ASSET}"
-    download "$URL" "$UPSTREAM/injector/$ASSET"
-    chmod 0755 "$UPSTREAM/injector/$ASSET"
-done
+INJECTOR_TARBALL="v${INJECTOR_VERSION}.tar.gz"
+URL="https://github.com/open-telemetry/opentelemetry-injector/archive/refs/tags/${INJECTOR_TARBALL}"
+INJECTOR_TMP="$(mktemp -d)"
+download "$URL" "$INJECTOR_TMP/$INJECTOR_TARBALL"
+
+# Extract the source tarball; GitHub tarballs extract to <repo>-<version>/
+tar -xzf "$INJECTOR_TMP/$INJECTOR_TARBALL" -C "$INJECTOR_TMP"
+# Move contents from opentelemetry-injector-<version>/ to upstream/injector/
+mv "$INJECTOR_TMP/opentelemetry-injector-${INJECTOR_VERSION}"/* "$UPSTREAM/injector/"
+rm -rf "$INJECTOR_TMP"
 
 # ---------------------------------------------------------------------------
 # 2. Java agent — single fat JAR

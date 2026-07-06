@@ -16,20 +16,39 @@ PACKAGING     := $(CURDIR)/debian/packaging
 %:
 	dh $@
 
-# There is no upstream build system to configure or compile.
+# There is no upstream build system to configure.
 override_dh_auto_configure:
 
+# Build the injector from source using Zig (ADR-007).
+# Uses upstream's Makefile which invokes zig build with appropriate flags.
+# Set ZIG_GLOBAL_CACHE_DIR to a writable location since sbuild runs as a
+# non-existent user whose home directory doesn't exist.
+# The zig0.15 package installs the binary as "zig0.15", so we create a
+# wrapper directory with a "zig" symlink and prepend it to PATH.
+ZIG_WRAPPER_DIR := $(CURDIR)/debian/.zig-wrapper
+
 override_dh_auto_build:
+	mkdir -p $(ZIG_WRAPPER_DIR)
+	ln -sf /usr/bin/zig0.15 $(ZIG_WRAPPER_DIR)/zig
+	PATH=$(ZIG_WRAPPER_DIR):$(PATH) \
+	ZIG_GLOBAL_CACHE_DIR=$(CURDIR)/.zig-cache \
+	    $(MAKE) -C $(ORIG_UPSTREAM)/injector ARCH=amd64
+
+# Run the injector unit tests during the build (Debian best practice).
+override_dh_auto_test:
+	PATH=$(ZIG_WRAPPER_DIR):$(PATH) \
+	ZIG_GLOBAL_CACHE_DIR=$(CURDIR)/.zig-cache \
+	    $(MAKE) -C $(ORIG_UPSTREAM)/injector zig-unit-tests
 
 # Stage all files into debian/tmp/ for dh_install to split into packages.
 # This runs after dh_prep (which wipes debian/tmp), so files survive into
 # the dh_install step. Everything comes from the unpacked orig tarball;
 # nothing is downloaded here.
 override_dh_auto_install:
-	# --- injector ---
+	# --- injector (built from source) ---
 	install -d $(CURDIR)/debian/tmp/usr/lib/opentelemetry/injector
 	install -m 0755 \
-	    $(ORIG_UPSTREAM)/injector/libotelinject_$(DEB_HOST_ARCH).so \
+	    $(ORIG_UPSTREAM)/injector/so/libotelinject.so \
 	    $(CURDIR)/debian/tmp/usr/lib/opentelemetry/injector/libotelinject.so
 
 	# --- java ---
@@ -109,13 +128,13 @@ override_dh_auto_install:
 	printf 'OpenTelemetry Auto-Instrumentation Suite\n' \
 	    > $(CURDIR)/debian/tmp/usr/share/doc/opentelemetry/README
 
-# There are no in-tree unit tests; testing is done via DEP-8 autopkgtests.
-override_dh_auto_test:
-
-# All .so files are pre-built upstream binaries.  dh_strip would try to
-# extract and repackage debug symbols; dh_shlibdeps would try to resolve
-# shared-library dependencies including libc.musl-* which is not present
-# on the glibc build host.  Exclude all .so files from both steps.
+# The .NET assemblies include pre-built upstream binaries.  dh_strip would
+# try to extract and repackage debug symbols; dh_shlibdeps would try to
+# resolve shared-library dependencies including libc.musl-* which is not
+# present on the glibc build host.  Exclude all opentelemetry .so files
+# from both steps.
+# Note: The injector is now built from source, but we still exclude it
+# from dh_strip/dh_shlibdeps for consistency with the .NET handling.
 override_dh_strip:
 	dh_strip -Xopentelemetry
 
