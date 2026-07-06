@@ -18,7 +18,7 @@ Produces packages that can be distributed via a Launchpad PPA or
 ## Installing from the PPA
 
 ```sh
-sudo add-apt-repository ppa:TODO-team/opentelemetry
+sudo add-apt-repository ppa:observability/opentelemetry
 sudo apt update
 sudo apt install opentelemetry
 ```
