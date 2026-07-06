@@ -46,18 +46,34 @@ override_dh_auto_install:
 	    --transform 's|^package|auto-instrumentations-node|'
 
 	# --- dotnet: arch-specific native libs + shared managed assemblies ---
-	install -d $(CURDIR)/debian/tmp/usr/lib/opentelemetry/dotnet
-	# Map deb arch to the dotnet subdirectory names used in the orig.
-	$(if $(filter amd64,$(DEB_HOST_ARCH)), \
+	# The injector constructs paths as <prefix>/<libc>/<arch>/Native.so
+	# where <libc> is "glibc" or "musl". Layout must be:
+	#   dotnet/glibc/linux-x64/   (or linux-arm64/)
+	#   dotnet/musl/linux-musl-x64/   (or linux-musl-arm64/)
+	#   dotnet/glibc/net/   (managed assemblies)
+	#   dotnet/musl/net/    (same content under musl path)
+	install -d \
+	    $(CURDIR)/debian/tmp/usr/lib/opentelemetry/dotnet/glibc \
+	    $(CURDIR)/debian/tmp/usr/lib/opentelemetry/dotnet/musl
+	sh -c 'if [ "$(DEB_HOST_ARCH)" = "amd64" ]; then \
 	    cp -a $(ORIG_UPSTREAM)/dotnet/linux-x64 \
-	          $(ORIG_UPSTREAM)/dotnet/linux-musl-x64 \
-	          $(CURDIR)/debian/tmp/usr/lib/opentelemetry/dotnet/)
-	$(if $(filter arm64,$(DEB_HOST_ARCH)), \
+	          $(CURDIR)/debian/tmp/usr/lib/opentelemetry/dotnet/glibc/linux-x64 && \
+	    cp -a $(ORIG_UPSTREAM)/dotnet/net \
+	          $(CURDIR)/debian/tmp/usr/lib/opentelemetry/dotnet/glibc/net && \
+	    cp -a $(ORIG_UPSTREAM)/dotnet/linux-musl-x64 \
+	          $(CURDIR)/debian/tmp/usr/lib/opentelemetry/dotnet/musl/linux-musl-x64 && \
+	    cp -a $(ORIG_UPSTREAM)/dotnet/net \
+	          $(CURDIR)/debian/tmp/usr/lib/opentelemetry/dotnet/musl/net; \
+	elif [ "$(DEB_HOST_ARCH)" = "arm64" ]; then \
 	    cp -a $(ORIG_UPSTREAM)/dotnet/linux-arm64 \
-	          $(ORIG_UPSTREAM)/dotnet/linux-musl-arm64 \
-	          $(CURDIR)/debian/tmp/usr/lib/opentelemetry/dotnet/)
-	cp -a $(ORIG_UPSTREAM)/dotnet/net \
-	      $(CURDIR)/debian/tmp/usr/lib/opentelemetry/dotnet/net
+	          $(CURDIR)/debian/tmp/usr/lib/opentelemetry/dotnet/glibc/linux-arm64 && \
+	    cp -a $(ORIG_UPSTREAM)/dotnet/net \
+	          $(CURDIR)/debian/tmp/usr/lib/opentelemetry/dotnet/glibc/net && \
+	    cp -a $(ORIG_UPSTREAM)/dotnet/linux-musl-arm64 \
+	          $(CURDIR)/debian/tmp/usr/lib/opentelemetry/dotnet/musl/linux-musl-arm64 && \
+	    cp -a $(ORIG_UPSTREAM)/dotnet/net \
+	          $(CURDIR)/debian/tmp/usr/lib/opentelemetry/dotnet/musl/net; \
+	fi'
 
 	# --- config files and conf.d drop-ins ---
 	install -d $(CURDIR)/debian/tmp/etc/opentelemetry/injector/conf.d
