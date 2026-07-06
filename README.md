@@ -254,8 +254,13 @@ The orig tarball is out of sync with the working tree.
 Re-run `debian/scripts/get-orig-source.sh` and retry.
 
 **`apt install opentelemetry` says "Unable to locate package".**
-Re-run `dpkg-scanpackages` and `sudo apt update` — the local repo index
-may be stale.
+Re-run `dpkg-scanpackages` from inside the repo directory and `sudo apt update` — the local repo index
+may be stale:
+
+```sh
+( cd /tmp/otel-local-repo && dpkg-scanpackages . | gzip -c > Packages.gz )
+sudo apt update
+```
 
 **The metapackage installs but `opentelemetry-injector1` is unsatisfied.**
 The `Provides` field was not picked up by APT.
