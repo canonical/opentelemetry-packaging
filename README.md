@@ -134,48 +134,55 @@ It is not committed to git.
 
 ### 3. Build with sbuild (recommended)
 
-sbuild builds packages in a clean chroot, ensuring all build dependencies
-are correctly declared. This is the recommended method and closely matches
-how Launchpad builds packages.
+sbuild builds in an isolated environment matching Launchpad's build farm.
+Ubuntu Stonking uses the `unshare` backend — no chroot directory is needed;
+sbuild uses a tarball instead.
+`sbuild-createchroot` and `schroot` are not used or needed.
 
-#### One-time setup: create a stonking chroot
+#### One-time setup
+
+Install the required tools:
 
 ```sh
-sudo apt install sbuild schroot debootstrap
-sudo sbuild-createchroot \
-    --include=eatmydata \
-    stonking \
-    /srv/chroot/stonking-amd64 \
-    http://archive.ubuntu.com/ubuntu
+sudo apt install sbuild mmdebstrap
 sudo sbuild-adduser $USER
-# Log out and back in for group membership to take effect
 ```
 
-The chroot is created with only the `main` component. Zig is in `universe`,
-so you need to enable it:
+Log out and back in for the group membership to take effect.
+
+Configure sbuild to use the unshare backend.
+Create `~/.config/sbuild/config.pl` if it does not exist and add:
+
+```perl
+$chroot_mode = "unshare";
+```
+
+Create the stonking base tarball.
+This is downloaded once and reused for all subsequent builds:
 
 ```sh
-sudo sbuild-shell stonking-amd64-sbuild
+mkdir -p ~/.cache/sbuild
+mmdebstrap --mode=unshare \
+    --variant=buildd \
+    --components=main,universe \
+    --include=fakeroot,build-essential,eatmydata \
+    stonking \
+    ~/.cache/sbuild/stonking-amd64.tar.zst \
+    http://archive.ubuntu.com/ubuntu
 ```
 
-Inside the chroot:
-
-```sh
-echo "deb http://archive.ubuntu.com/ubuntu stonking universe" >> /etc/apt/sources.list
-apt update
-exit
-```
+`--components=main,universe` is required because `zig0.15` (needed to build
+the injector from source) lives in `universe`.
 
 #### Build the package
 
 ```sh
-sbuild -d stonking -c stonking-amd64-sbuild --no-clean-source --no-run-lintian
+sbuild --dist=stonking --no-run-lintian opentelemetry_0.1.0-0ubuntu1.dsc
 ```
 
-The `--no-clean-source` flag preserves the source tree for debugging if the
-build fails. Built packages appear in the current directory.
-
-The `--no-run-lintian` flag skips lintian checks. We will fix these later.
+Built packages appear in the current directory.
+`--no-run-lintian` skips lintian checks for now; these will be addressed
+before universe submission.
 
 ### 4. Alternative: build with dpkg-buildpackage
 
@@ -244,7 +251,7 @@ Create a minimal local APT repository instead:
 
 ```sh
 mkdir -p /tmp/otel-local-repo
-cp ../*.deb /tmp/otel-local-repo/
+cp ./*.deb /tmp/otel-local-repo/
 (cd /tmp/otel-local-repo && dpkg-scanpackages . | gzip -c > Packages.gz)
 
 echo "deb [trusted=yes] file:///tmp/otel-local-repo ./" \
