@@ -1,0 +1,11 @@
+# source-is-missing: the injector and .NET native profiler libraries are
+# pre-built upstream binaries included in the orig tarball.  Building them
+# from source is deferred to the Ubuntu universe path.
+opentelemetry source: source-is-missing [upstream/injector/*]
+opentelemetry source: source-is-missing [upstream/dotnet/linux-*/*.so]
+
+# source-contains-prebuilt-windows-binary: lintian flags .dll files as
+# Windows PE binaries.  These are cross-platform .NET managed assemblies
+# (ECMA CIL bytecode) that run on Linux via the .NET runtime; they are not
+# Windows-only executables.
+opentelemetry source: source-contains-prebuilt-windows-binary [upstream/dotnet/*]

@@ -1,0 +1,12 @@
+debian/files
+debian/tmp/
+debian/.debhelper/
+debian/debhelper-build-stamp
+debian/*.debhelper.log
+debian/*.substvars
+debian/opentelemetry/
+debian/opentelemetry-injector/
+debian/opentelemetry-java-autoinstrumentation/
+debian/opentelemetry-nodejs-autoinstrumentation/
+debian/opentelemetry-dotnet-autoinstrumentation/
+upstream/

@@ -1,0 +1,59 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: opentelemetry-packaging
+Upstream-Contact: OpenTelemetry Packaging SIG <opentelemetry-packaging@TODO>
+Source: https://github.com/canonical/opentelemetry-packaging
+Comment:
+ This source package contains packaging scripts and configuration files
+ authored by Canonical.  At build time it fetches pre-built upstream
+ artifacts from several OpenTelemetry projects; those artifacts are
+ distributed under their own licenses (see the Bundled-Components section
+ below).  A full license audit of all bundled components is required before
+ this package can be submitted to Ubuntu universe.
+
+Files: *
+Copyright: 2026 Canonical Ltd.
+License: Apache-2.0
+
+Files: debian/*
+Copyright: 2026 Canonical Ltd.
+License: Apache-2.0
+
+License: Apache-2.0
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+ .
+     https://www.apache.org/licenses/LICENSE-2.0
+ .
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+
+# ---------------------------------------------------------------------------
+# Bundled upstream components (fetched at build time, not in this source tree)
+# ---------------------------------------------------------------------------
+#
+# opentelemetry-injector (libotelinject.so)
+#   Source:  https://github.com/open-telemetry/opentelemetry-injector
+#   License: Apache-2.0
+#
+# opentelemetry-java-instrumentation (opentelemetry-javaagent.jar)
+#   Source:  https://github.com/open-telemetry/opentelemetry-java-instrumentation
+#   License: Apache-2.0
+#   Note:    The JAR bundles many transitive dependencies.  A full bundled-
+#            dependency audit is required for Ubuntu universe submission.
+#
+# @opentelemetry/auto-instrumentations-node (node_modules tree)
+#   Source:  https://www.npmjs.com/package/@opentelemetry/auto-instrumentations-node
+#   License: Apache-2.0
+#   Note:    The node_modules tree contains hundreds of transitive npm
+#            packages, each with its own license.  A full audit is required
+#            for Ubuntu universe submission.
+#
+# opentelemetry-dotnet-instrumentation (managed assemblies + native .so)
+#   Source:  https://github.com/open-telemetry/opentelemetry-dotnet-instrumentation
+#   License: Apache-2.0
+#   Note:    The .NET bundle contains managed assemblies and a native profiler
+#            library.  A full audit is required for Ubuntu universe submission.

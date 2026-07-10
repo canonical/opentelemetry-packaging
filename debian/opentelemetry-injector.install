@@ -1,0 +1,5 @@
+usr/lib/opentelemetry/injector/libotelinject.so
+etc/opentelemetry/injector/injector.conf
+etc/opentelemetry/injector/default_env.conf
+usr/share/opentelemetry-injector/postinstall-injector.sh
+usr/share/opentelemetry-injector/preuninstall-injector.sh
