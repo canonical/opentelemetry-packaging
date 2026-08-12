@@ -128,15 +128,11 @@ override_dh_auto_install:
 	printf 'OpenTelemetry Auto-Instrumentation Suite\n' \
 	    > $(CURDIR)/debian/tmp/usr/share/doc/opentelemetry/README
 
-# The .NET assemblies include pre-built upstream binaries.  dh_strip would
-# try to extract and repackage debug symbols; dh_shlibdeps would try to
-# resolve shared-library dependencies including libc.musl-* which is not
-# present on the glibc build host.  Exclude all opentelemetry .so files
-# from both steps.
-# Note: The injector is now built from source, but we still exclude it
-# from dh_strip/dh_shlibdeps for consistency with the .NET handling.
+# The .NET musl binaries are built against musl libc, which is not present
+# on the glibc build host.  Exclude only the musl paths from dh_strip and
+# dh_shlibdeps; the glibc binaries can be processed normally.
 override_dh_strip:
-	dh_strip -Xopentelemetry
+	dh_strip -Xlinux-musl-
 
 override_dh_shlibdeps:
-	dh_shlibdeps -Xopentelemetry
+	dh_shlibdeps -Xlinux-musl-
