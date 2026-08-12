@@ -7,7 +7,6 @@ Build-Depends:
  debhelper-compat (= 13),
  curl,
  jq,
- make,
  zig0.15,
 Standards-Version: 4.6.2
 Homepage: https://github.com/canonical/opentelemetry-packaging
@@ -74,6 +73,7 @@ Package: opentelemetry-dotnet-autoinstrumentation
 Architecture: amd64 arm64
 Depends:
  ${misc:Depends},
+ ${shlibs:Depends},
 Provides:
  opentelemetry-dotnet-autoinstrumentation1,
 Suggests:
@@ -97,7 +97,7 @@ Recommends:
  opentelemetry-java-autoinstrumentation1,
  opentelemetry-nodejs-autoinstrumentation1,
  opentelemetry-dotnet-autoinstrumentation1,
-Description: OpenTelemetry Auto-Instrumentation Suite (metapackage)
+Description: Auto-instrumentation suite for distributed tracing (metapackage)
  A metapackage that installs the complete OpenTelemetry auto-instrumentation
  suite for Linux hosts: the LD_PRELOAD injector and language agents for Java,
  Node.js, and .NET.

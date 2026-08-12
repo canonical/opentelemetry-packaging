@@ -1,7 +1,7 @@
-opentelemetry (0.1.0-0ubuntu1) noble; urgency=medium
+opentelemetry (0.1.0-0ubuntu1) stonking; urgency=medium
 
   * Initial packaging of the OpenTelemetry auto-instrumentation suite for
-    Ubuntu Noble (24.04 LTS).
+    Ubuntu Stonking (26.10).
   * Packages the OpenTelemetry LD_PRELOAD injector, Java agent, Node.js
     auto-instrumentation, .NET Automatic Instrumentation, and a metapackage.
   * Upstream artifacts are fetched from GitHub releases at build time.

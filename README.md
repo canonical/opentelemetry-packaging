@@ -177,12 +177,8 @@ the injector from source) lives in `universe`.
 #### Build the package
 
 ```sh
-sbuild --dist=stonking --no-run-lintian opentelemetry_0.1.0-0ubuntu1.dsc
+sbuild --dist=stonking
 ```
-
-Built packages appear in the current directory.
-`--no-run-lintian` skips lintian checks for now; these will be addressed
-before universe submission.
 
 ### 4. Alternative: build with dpkg-buildpackage
 

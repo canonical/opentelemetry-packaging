@@ -1,1 +1,1 @@
-extend-diff-ignore = ^upstream/|^README\.md$|^LICENSE$|^\.github/|^docs/|^\.opencode/|^\.zig-cache/
+extend-diff-ignore = ^upstream/|^README\.md$|^LICENSE$|^\.github/|^docs/|^\.opencode/|^\.zig-cache/|AGENTS.md
