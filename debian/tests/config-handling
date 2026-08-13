@@ -1,0 +1,106 @@
+#!/bin/sh
+# autopkgtest: config-handling
+# Tests conffile handling across remove and purge operations.
+#
+# Covers:
+#   - Config files exist after install
+#   - Custom drop-in survives reinstall
+#   - Remove keeps conffiles (package in "rc" state)
+#   - Custom drop-in survives remove
+#   - Purge removes conffiles
+#   - Custom drop-in behavior on purge
+
+set -eu
+
+CONF_DIR=/etc/opentelemetry/injector
+CONF_FILE=$CONF_DIR/injector.conf
+ENV_FILE=$CONF_DIR/default_env.conf
+DROPIN_DIR=$CONF_DIR/conf.d
+CUSTOM_DROPIN=$DROPIN_DIR/99-custom.conf
+INJECTOR_LIB=/usr/lib/opentelemetry/injector/libotelinject.so
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "PASS: $1"; }
+
+file_contains() {
+    grep -qF "$2" "$1" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+echo "=== Test: config files exist after install ==="
+
+[ -f "$CONF_FILE" ] || fail "$CONF_FILE missing"
+[ -f "$ENV_FILE" ] || fail "$ENV_FILE missing"
+[ -d "$DROPIN_DIR" ] || fail "$DROPIN_DIR missing"
+pass "config files present after install"
+
+# ---------------------------------------------------------------------------
+echo "=== Test: custom drop-in survives reinstall ==="
+
+echo "OTEL_SERVICE_NAME=custom-test" > "$CUSTOM_DROPIN"
+apt-get -y install --reinstall opentelemetry-injector >/dev/null
+
+[ -f "$CUSTOM_DROPIN" ] || fail "custom drop-in deleted by reinstall"
+file_contains "$CUSTOM_DROPIN" "OTEL_SERVICE_NAME=custom-test" || fail "custom drop-in content changed"
+pass "custom drop-in survives reinstall"
+
+# ---------------------------------------------------------------------------
+echo "=== Test: remove keeps conffiles (rc state) ==="
+
+apt-get -y remove opentelemetry-injector >/dev/null
+
+# Verify package is in "rc" (removed, config-files remain) state
+status=$(dpkg-query -W -f='${db:Status-Abbrev}' opentelemetry-injector 2>/dev/null || echo "unknown")
+case "$status" in
+    rc\ *|rc) ;;  # expected
+    *) fail "expected 'rc' status after remove, got '$status'" ;;
+esac
+
+[ -f "$CONF_FILE" ] || fail "$CONF_FILE was deleted by remove (should be kept)"
+[ -f "$ENV_FILE" ] || fail "$ENV_FILE was deleted by remove"
+[ ! -f "$INJECTOR_LIB" ] || fail "$INJECTOR_LIB still exists after remove"
+pass "remove keeps conffiles, deletes payload"
+
+# ---------------------------------------------------------------------------
+echo "=== Test: custom drop-in survives remove ==="
+
+[ -f "$CUSTOM_DROPIN" ] || fail "custom drop-in deleted by remove"
+pass "custom drop-in survives remove"
+
+# ---------------------------------------------------------------------------
+echo "=== Test: purge removes conffiles ==="
+
+apt-get -y purge opentelemetry-injector >/dev/null
+
+# Verify package is completely unknown or purged
+if dpkg-query -W opentelemetry-injector >/dev/null 2>&1; then
+    status=$(dpkg-query -W -f='${db:Status-Abbrev}' opentelemetry-injector)
+    case "$status" in
+        un\ *|un|"") ;;  # unknown/not-installed is fine
+        *) fail "expected package to be purged, got status '$status'" ;;
+    esac
+fi
+
+[ ! -f "$CONF_FILE" ] || fail "$CONF_FILE still exists after purge"
+[ ! -f "$ENV_FILE" ] || fail "$ENV_FILE still exists after purge"
+pass "purge removes conffiles"
+
+# ---------------------------------------------------------------------------
+echo "=== Test: custom drop-in survives purge (not owned by package) ==="
+# The custom drop-in is NOT a conffile, so dpkg does not track it.
+# If conf.d/ directory still exists, the drop-in should be there.
+# If the whole directory is gone, that is also acceptable (purge removed tree).
+
+if [ -d "$DROPIN_DIR" ]; then
+    [ -f "$CUSTOM_DROPIN" ] || fail "custom drop-in deleted but conf.d/ still exists"
+    pass "custom drop-in survives purge"
+else
+    # The whole directory was removed by purge; acceptable behavior.
+    pass "conf.d/ directory removed by purge (acceptable)"
+fi
+
+# ---------------------------------------------------------------------------
+echo "=== Reinstalling for subsequent tests ==="
+apt-get -y install opentelemetry-injector >/dev/null
+
+echo "=== All config-handling tests passed ==="
