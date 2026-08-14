@@ -281,7 +281,7 @@ sudo autopkgtest ../*.deb -- null
 In an isolated LXD container:
 
 ```sh
-sudo autopkgtest ../*.deb -- lxd ubuntu:stonking
+sudo autopkgtest -U ../*.deb -- lxd ubuntu-daily:stonking
 ```
 
 ### 9. Clean up

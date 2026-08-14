@@ -60,3 +60,20 @@ Depends: opentelemetry
 
 Test-Command: test -f /usr/share/doc/opentelemetry/README
 Depends: opentelemetry
+
+# ---------------------------------------------------------------------------
+# Lifecycle tests
+# ---------------------------------------------------------------------------
+# These tests exercise package install/remove/purge behavior and require
+# root privileges and an isolated testbed because they modify system state.
+#
+# This section aims to be an autopkgtest rewrite of relevant upstream tests:
+# https://github.com/open-telemetry/opentelemetry-packaging/tree/main/packaging/tests/lifecycle
+
+Tests: preload-management
+Depends: opentelemetry-injector
+Restrictions: needs-root, breaks-testbed, allow-stderr
+
+Tests: config-handling
+Depends: opentelemetry-injector
+Restrictions: needs-root, breaks-testbed, allow-stderr

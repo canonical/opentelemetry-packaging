@@ -1,0 +1,95 @@
+#!/bin/sh
+# autopkgtest: preload-management
+# Tests that the injector correctly manages /etc/ld.so.preload entries.
+#
+# Covers:
+#   - Entry created on install
+#   - Reinstall is idempotent (no duplicate entries)
+#   - Foreign entries preserved on reinstall
+#   - Remove deletes injector entry but keeps foreign entries
+#   - Reinstall after remove restores entry
+
+set -eu
+
+PRELOAD=/etc/ld.so.preload
+INJECTOR_LIB=/usr/lib/opentelemetry/injector/libotelinject.so
+FOREIGN_LIB=/opt/example/libabcdefgh.so
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "PASS: $1"; }
+
+count_injector_entries() {
+    if [ ! -f "$PRELOAD" ]; then
+        echo 0
+        return
+    fi
+    # Count exact matches only (POSIX shell, no grep)
+    n=0
+    while IFS= read -r line; do
+        case "$line" in
+            "$INJECTOR_LIB") n=$((n + 1)) ;;
+        esac
+    done < "$PRELOAD"
+    echo "$n"
+}
+
+has_foreign_entry() {
+    [ -f "$PRELOAD" ] || return 1
+    while IFS= read -r line; do
+        case "$line" in
+            "$FOREIGN_LIB") return 0 ;;
+        esac
+    done < "$PRELOAD"
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+echo "=== Test: preload entry exists after install ==="
+# The package is already installed by autopkgtest; verify the entry is present.
+
+[ -f "$PRELOAD" ] || fail "$PRELOAD does not exist"
+[ "$(count_injector_entries)" -eq 1 ] || fail "expected exactly 1 injector entry"
+pass "preload entry present after install"
+
+# ---------------------------------------------------------------------------
+echo "=== Test: reinstall does not duplicate entry ==="
+
+apt-get -y install --reinstall opentelemetry-injector >/dev/null
+[ "$(count_injector_entries)" -eq 1 ] || fail "reinstall duplicated the entry"
+pass "reinstall is idempotent"
+
+# ---------------------------------------------------------------------------
+echo "=== Test: foreign entries are preserved ==="
+# Seed a foreign entry, reinstall, verify it survives.
+
+echo "$FOREIGN_LIB" >> "$PRELOAD"
+apt-get -y install --reinstall opentelemetry-injector >/dev/null
+
+has_foreign_entry || fail "foreign entry lost after reinstall"
+[ "$(count_injector_entries)" -eq 1 ] || fail "injector entry count wrong after foreign seed"
+pass "foreign entries preserved on reinstall"
+
+# ---------------------------------------------------------------------------
+echo "=== Test: remove deletes injector entry but keeps foreign ==="
+
+apt-get -y remove opentelemetry-injector >/dev/null
+
+[ -f "$PRELOAD" ] || fail "$PRELOAD was deleted (should remain for foreign entry)"
+has_foreign_entry || fail "foreign entry lost after remove"
+[ "$(count_injector_entries)" -eq 0 ] || fail "injector entry not removed"
+pass "remove deletes injector entry, preserves foreign"
+
+# ---------------------------------------------------------------------------
+echo "=== Test: reinstall after remove restores entry ==="
+
+apt-get -y install opentelemetry-injector >/dev/null
+[ "$(count_injector_entries)" -eq 1 ] || fail "entry not restored after reinstall"
+pass "reinstall after remove restores entry"
+
+# ---------------------------------------------------------------------------
+# Cleanup: remove the foreign entry to leave a clean state.
+if [ -f "$PRELOAD" ]; then
+    grep -v "^${FOREIGN_LIB}$" "$PRELOAD" > "${PRELOAD}.tmp" && mv "${PRELOAD}.tmp" "$PRELOAD"
+fi
+
+echo "=== All preload-management tests passed ==="
