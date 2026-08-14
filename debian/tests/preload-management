@@ -13,7 +13,7 @@ set -eu
 
 PRELOAD=/etc/ld.so.preload
 INJECTOR_LIB=/usr/lib/opentelemetry/injector/libotelinject.so
-FOREIGN_LIB=/opt/acme/libfoo.so
+FOREIGN_LIB=/opt/example/libabcdefgh.so
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
 pass() { echo "PASS: $1"; }

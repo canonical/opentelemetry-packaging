@@ -37,11 +37,11 @@ pass "config files present after install"
 # ---------------------------------------------------------------------------
 echo "=== Test: custom drop-in survives reinstall ==="
 
-echo "OTEL_SERVICE_NAME=custom-test" > "$CUSTOM_DROPIN"
+echo "OTEL_FAKE_CONFIG_OPTION=this-should-be-ignored" > "$CUSTOM_DROPIN"
 apt-get -y install --reinstall opentelemetry-injector >/dev/null
 
 [ -f "$CUSTOM_DROPIN" ] || fail "custom drop-in deleted by reinstall"
-file_contains "$CUSTOM_DROPIN" "OTEL_SERVICE_NAME=custom-test" || fail "custom drop-in content changed"
+file_contains "$CUSTOM_DROPIN" "OTEL_FAKE_CONFIG_OPTION=this-should-be-ignored" || fail "custom drop-in content changed"
 pass "custom drop-in survives reinstall"
 
 # ---------------------------------------------------------------------------
@@ -100,7 +100,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-echo "=== Reinstalling for subsequent tests ==="
-apt-get -y install opentelemetry-injector >/dev/null
+# Clean up test artifacts to avoid injector warnings during autopkgtest teardown
+rm -f "$CUSTOM_DROPIN"
 
 echo "=== All config-handling tests passed ==="
