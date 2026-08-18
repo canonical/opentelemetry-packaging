@@ -8,7 +8,7 @@
 include /usr/share/dpkg/architecture.mk
 include $(CURDIR)/debian/versions.mk
 
-# The orig tarball unpacks to opentelemetry-<SUITE_VERSION>/upstream/.
+# The orig tarball unpacks to opentelemetry-injector-<SUITE_VERSION>/upstream/.
 # All upstream artifacts are already present there — no network access needed.
 ORIG_UPSTREAM := $(CURDIR)/upstream
 PACKAGING     := $(CURDIR)/debian/packaging
@@ -51,70 +51,12 @@ override_dh_auto_install:
 	    $(ORIG_UPSTREAM)/injector/so/libotelinject.so \
 	    $(CURDIR)/debian/tmp/usr/lib/opentelemetry/injector/libotelinject.so
 
-	# --- java ---
-	install -d $(CURDIR)/debian/tmp/usr/lib/opentelemetry/java
-	install -m 0644 \
-	    $(ORIG_UPSTREAM)/java/opentelemetry-javaagent.jar \
-	    $(CURDIR)/debian/tmp/usr/lib/opentelemetry/java/opentelemetry-javaagent.jar
-
-	# --- nodejs: unpack npm tarball into node_modules tree ---
-	install -d $(CURDIR)/debian/tmp/usr/lib/opentelemetry/nodejs/node_modules/@opentelemetry
-	tar -xzf \
-	    $(ORIG_UPSTREAM)/nodejs/auto-instrumentations-node-$(NODEJS_VERSION).tgz \
-	    -C $(CURDIR)/debian/tmp/usr/lib/opentelemetry/nodejs/node_modules/@opentelemetry \
-	    --transform 's|^package|auto-instrumentations-node|'
-
-	# --- dotnet: arch-specific native libs + shared managed assemblies ---
-	# The injector constructs paths as <prefix>/<libc>/<arch>/Native.so
-	# where <libc> is "glibc" or "musl". Layout must be:
-	#   dotnet/glibc/linux-x64/   (or linux-arm64/)
-	#   dotnet/musl/linux-musl-x64/   (or linux-musl-arm64/)
-	#   dotnet/glibc/net/   (managed assemblies)
-	#   dotnet/musl/net/    (same content under musl path)
-	install -d \
-	    $(CURDIR)/debian/tmp/usr/lib/opentelemetry/dotnet/glibc \
-	    $(CURDIR)/debian/tmp/usr/lib/opentelemetry/dotnet/musl
-	sh -c 'if [ "$(DEB_HOST_ARCH)" = "amd64" ]; then \
-	    cp -a $(ORIG_UPSTREAM)/dotnet/linux-x64 \
-	          $(CURDIR)/debian/tmp/usr/lib/opentelemetry/dotnet/glibc/linux-x64 && \
-	    cp -a $(ORIG_UPSTREAM)/dotnet/net \
-	          $(CURDIR)/debian/tmp/usr/lib/opentelemetry/dotnet/glibc/net && \
-	    cp -a $(ORIG_UPSTREAM)/dotnet/linux-musl-x64 \
-	          $(CURDIR)/debian/tmp/usr/lib/opentelemetry/dotnet/musl/linux-musl-x64 && \
-	    cp -a $(ORIG_UPSTREAM)/dotnet/net \
-	          $(CURDIR)/debian/tmp/usr/lib/opentelemetry/dotnet/musl/net; \
-	elif [ "$(DEB_HOST_ARCH)" = "arm64" ]; then \
-	    cp -a $(ORIG_UPSTREAM)/dotnet/linux-arm64 \
-	          $(CURDIR)/debian/tmp/usr/lib/opentelemetry/dotnet/glibc/linux-arm64 && \
-	    cp -a $(ORIG_UPSTREAM)/dotnet/net \
-	          $(CURDIR)/debian/tmp/usr/lib/opentelemetry/dotnet/glibc/net && \
-	    cp -a $(ORIG_UPSTREAM)/dotnet/linux-musl-arm64 \
-	          $(CURDIR)/debian/tmp/usr/lib/opentelemetry/dotnet/musl/linux-musl-arm64 && \
-	    cp -a $(ORIG_UPSTREAM)/dotnet/net \
-	          $(CURDIR)/debian/tmp/usr/lib/opentelemetry/dotnet/musl/net; \
-	fi'
-
-	# --- config files and conf.d drop-ins ---
+	# --- config files ---
 	install -d $(CURDIR)/debian/tmp/etc/opentelemetry/injector/conf.d
-	install -d $(CURDIR)/debian/tmp/etc/opentelemetry/java
-	install -d $(CURDIR)/debian/tmp/etc/opentelemetry/nodejs
-	install -d $(CURDIR)/debian/tmp/etc/opentelemetry/dotnet
 	install -m 0644 $(PACKAGING)/common/injector/injector.conf \
 	    $(CURDIR)/debian/tmp/etc/opentelemetry/injector/injector.conf
 	install -m 0644 $(PACKAGING)/common/injector/default_env.conf \
 	    $(CURDIR)/debian/tmp/etc/opentelemetry/injector/default_env.conf
-	install -m 0644 $(PACKAGING)/common/java/injector.conf \
-	    $(CURDIR)/debian/tmp/etc/opentelemetry/injector/conf.d/java.conf
-	install -m 0644 $(PACKAGING)/common/java/otel-sdk-config.yaml \
-	    $(CURDIR)/debian/tmp/etc/opentelemetry/java/otel-sdk-config.yaml
-	install -m 0644 $(PACKAGING)/common/nodejs/injector.conf \
-	    $(CURDIR)/debian/tmp/etc/opentelemetry/injector/conf.d/nodejs.conf
-	install -m 0644 $(PACKAGING)/common/nodejs/otel-sdk-config.yaml \
-	    $(CURDIR)/debian/tmp/etc/opentelemetry/nodejs/otel-sdk-config.yaml
-	install -m 0644 $(PACKAGING)/common/dotnet/injector.conf \
-	    $(CURDIR)/debian/tmp/etc/opentelemetry/injector/conf.d/dotnet.conf
-	install -m 0644 $(PACKAGING)/common/dotnet/otel-sdk-config.yaml \
-	    $(CURDIR)/debian/tmp/etc/opentelemetry/dotnet/otel-sdk-config.yaml
 
 	# --- injector lifecycle scripts ---
 	install -d $(CURDIR)/debian/tmp/usr/share/opentelemetry-injector
@@ -122,17 +64,3 @@ override_dh_auto_install:
 	    $(CURDIR)/debian/tmp/usr/share/opentelemetry-injector/postinstall-injector.sh
 	install -m 0755 $(PACKAGING)/common/scripts/preuninstall-injector.sh \
 	    $(CURDIR)/debian/tmp/usr/share/opentelemetry-injector/preuninstall-injector.sh
-
-	# --- metapackage doc placeholder ---
-	install -d $(CURDIR)/debian/tmp/usr/share/doc/opentelemetry
-	printf 'OpenTelemetry Auto-Instrumentation Suite\n' \
-	    > $(CURDIR)/debian/tmp/usr/share/doc/opentelemetry/README
-
-# The .NET musl binaries are built against musl libc, which is not present
-# on the glibc build host.  Exclude only the musl paths from dh_strip and
-# dh_shlibdeps; the glibc binaries can be processed normally.
-override_dh_strip:
-	dh_strip -Xlinux-musl-
-
-override_dh_shlibdeps:
-	dh_shlibdeps -Xlinux-musl-

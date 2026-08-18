@@ -1,3 +1,0 @@
-usr/lib/opentelemetry/nodejs/node_modules
-etc/opentelemetry/injector/conf.d/nodejs.conf
-etc/opentelemetry/nodejs/otel-sdk-config.yaml

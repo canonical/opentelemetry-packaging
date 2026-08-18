@@ -1,62 +1,50 @@
-# opentelemetry
+# opentelemetry-injector
 
-Debian packaging for the OpenTelemetry auto-instrumentation suite,
-targeting Ubuntu Stonking (26.10).
-Produces packages that can be distributed via a Launchpad PPA or
+Debian packaging for the OpenTelemetry LD_PRELOAD automatic instrumentation
+injector, targeting Ubuntu Stonking (26.10).
+Produces a package that can be distributed via a Launchpad PPA or
 (after a full license audit and source build) Ubuntu universe.
 
-## Packages
+## Package
 
 | Binary package | Description |
 |---|---|
 | `opentelemetry-injector` | LD_PRELOAD-based injector that activates language agents |
-| `opentelemetry-java-autoinstrumentation` | OpenTelemetry Java agent JAR |
-| `opentelemetry-nodejs-autoinstrumentation` | OpenTelemetry Node.js auto-instrumentation |
-| `opentelemetry-dotnet-autoinstrumentation` | OpenTelemetry .NET Automatic Instrumentation |
-| `opentelemetry` | Metapackage — installs the full suite |
 
 ## Installing from the PPA
 
 ```sh
 sudo add-apt-repository ppa:observability/opentelemetry
 sudo apt update
-sudo apt install opentelemetry
+sudo apt install opentelemetry-injector
 ```
 
 ## Repository layout
 
 ```
 debian/                  Standard Debian packaging metadata
-  control                Source package + 5 binary package stanzas
-  rules                  dh build rules; copies from unpacked orig (no network)
-  versions.mk            Pinned upstream component versions
-  packaging/             Config files, conf.d drop-ins, lifecycle scripts
+  control                Source package + opentelemetry-injector binary stanza
+  rules                  dh build rules; builds injector from source with Zig
+  versions.mk            Pinned injector version
+  packaging/             Config files and lifecycle scripts
     common/
       injector/          injector.conf, default_env.conf
-      java/              java.conf (conf.d drop-in), otel-sdk-config.yaml
-      nodejs/            nodejs.conf (conf.d drop-in), otel-sdk-config.yaml
-      dotnet/            dotnet.conf (conf.d drop-in), otel-sdk-config.yaml
       scripts/           postinstall-injector.sh, preuninstall-injector.sh
   scripts/
-    get-orig-source.sh   Downloads pinned upstream releases, assembles orig tarball
+    get-orig-source.sh   Downloads pinned injector source, assembles orig tarball
   tests/control          DEP-8 autopkgtests run by Launchpad
+  tests/preload-management   Lifecycle test: /etc/ld.so.preload management
+  tests/config-handling      Lifecycle test: conffile handling across remove/purge
   opentelemetry-injector.postinst   Appends libotelinject.so to /etc/ld.so.preload
   opentelemetry-injector.prerm      Removes libotelinject.so from /etc/ld.so.preload
   *.install              File-to-package mappings for dh_install
-  *.conffiles            User-editable config files preserved on upgrade
   source/options         extend-diff-ignore rules for upstream/ binary tree
-  source/lintian-overrides   Overrides for expected prebuilt-binary warnings
+  source/format          3.0 (quilt)
 
 .github/workflows/
   build-and-upload.yml   CI: build source package, sign, dput to Launchpad
 
-docs/adr/                Architecture Decision Records
-  001-ppa-first-universe-later.md
-  002-source-package-name.md
-  003-debian-toolchain-not-nfpm.md
-  004-quilt-format-pinned-orig.md
-  005-bundle-nodejs-node-modules.md
-  006-dep8-autopkgtests.md
+docs/adr/
   007-build-injector-from-source.md
 ```
 
@@ -71,73 +59,56 @@ This section walks through a full local build and install cycle.
 ### How it works
 
 This package uses the `3.0 (quilt)` Debian source format.
-The orig tarball (`opentelemetry_<version>.orig.tar.gz`) contains upstream
-artifacts downloaded at pinned versions from `debian/versions.mk`:
+The orig tarball (`opentelemetry-injector_<version>.orig.tar.gz`) contains the
+injector source tree downloaded at the pinned version from `debian/versions.mk`:
 
 - **Injector**: Source code (built from source using Zig during package build)
-- **Java agent**: Pre-built JAR
-- **Node.js**: Pre-built npm bundle
-- **.NET**: Pre-built assemblies
 
 The `debian/` layer (config files, build rules, maintainer scripts) sits on
 top of that.
 
 At build time `debian/rules` builds the injector from source and copies
-the other artifacts from the unpacked orig into the package staging area.
+the result into the package staging area.
 **No network access is required during the build itself.**
 Network access is only needed when generating the orig tarball
 (`debian/scripts/get-orig-source.sh`), which maintainers run locally before
 uploading to Launchpad.
 
-**Note:** Building the injector from source requires Zig >= 0.14, which is
+**Note:** Building the injector from source requires Zig >= 0.15, which is
 available in Ubuntu 26.10 (Stonking) but not in earlier releases. See ADR-007
 for details.
 
 ### Prerequisites
 
 ```sh
-sudo apt install debhelper devscripts dpkg-dev curl jq unzip
+sudo apt install debhelper devscripts dpkg-dev curl
 ```
 
-### 1. Pin the component versions
+### 1. Pin the component version
 
-Open `debian/versions.mk` and check the pinned versions.
-To upgrade a component, update its version line and re-run step 2.
+Open `debian/versions.mk` and check the pinned version.
+To upgrade, update the version line and re-run step 2.
 
 ```
 INJECTOR_VERSION := 0.9.0
-JAVA_VERSION     := 2.29.0
-NODEJS_VERSION   := 0.77.0
-DOTNET_VERSION   := 1.15.0
 ```
 
 ### 2. Generate the orig tarball
 
-This downloads the pinned upstream artifacts and assembles
-`opentelemetry_<SUITE_VERSION>.orig.tar.gz` one directory above the repo root.
-It needs to be run once per version, or whenever you change a version in
-`debian/versions.mk`.
+This downloads the pinned injector source and assembles
+`opentelemetry-injector_<SUITE_VERSION>.orig.tar.gz` one directory above the
+repo root.
+Run once per version, or whenever you change a version in `debian/versions.mk`.
 
 ```sh
 debian/scripts/get-orig-source.sh
 ```
-
-The script downloads:
-- Source tarball for the injector (built from source during package build)
-- `opentelemetry-javaagent.jar` from the Java instrumentation releases
-- `auto-instrumentations-node-<version>.tgz` from the npm registry
-- Four .NET zips (glibc/musl × amd64/arm64) from the dotnet-instrumentation releases
-
-The resulting tarball contains an `upstream/` directory with the injector
-source tree and pre-built artifacts for other components.
-It is not committed to git.
 
 ### 3. Build with sbuild (recommended)
 
 sbuild builds in an isolated environment matching Launchpad's build farm.
 Ubuntu Stonking uses the `unshare` backend — no chroot directory is needed;
 sbuild uses a tarball instead.
-`sbuild-createchroot` and `schroot` are not used or needed.
 
 #### One-time setup
 
@@ -182,13 +153,13 @@ sbuild --dist=stonking
 
 ### 4. Alternative: build with dpkg-buildpackage
 
-If you have Zig >= 0.14 installed locally (e.g., on Ubuntu 26.10), you can
+If you have Zig >= 0.15 installed locally (e.g., on Ubuntu 26.10), you can
 build directly without sbuild.
 
 First, unpack the orig tarball:
 
 ```sh
-tar -xzf ../opentelemetry_0.1.0.orig.tar.gz --strip-components=1 --wildcards '*/upstream'
+tar -xzf ../opentelemetry-injector_0.1.0.orig.tar.gz --strip-components=1 --wildcards '*/upstream'
 ```
 
 Then build:
@@ -197,9 +168,7 @@ Then build:
 dpkg-buildpackage -us -uc
 ```
 
-`debian/rules` builds the injector from source, copies other artifacts from
-the unpacked `upstream/` tree into `debian/tmp/`, then `dh_install` splits
-them into the five binary packages.
+`debian/rules` builds the injector from source then copies it into `debian/tmp/`.
 
 Once done:
 
@@ -210,14 +179,10 @@ ls ../*.deb
 Expected output:
 
 ```
-../opentelemetry_0.1.0-0ubuntu1_all.deb
 ../opentelemetry-injector_0.1.0-0ubuntu1_amd64.deb
-../opentelemetry-java-autoinstrumentation_0.1.0-0ubuntu1_all.deb
-../opentelemetry-nodejs-autoinstrumentation_0.1.0-0ubuntu1_all.deb
-../opentelemetry-dotnet-autoinstrumentation_0.1.0-0ubuntu1_amd64.deb
 ```
 
-### 5. Inspect a package before installing
+### 5. Inspect the package before installing
 
 `dpkg-deb -c` lists every file the package will install:
 
@@ -231,15 +196,7 @@ dpkg-deb -c ../opentelemetry-injector_0.1.0-0ubuntu1_amd64.deb
 dpkg-deb -I ../opentelemetry-injector_0.1.0-0ubuntu1_amd64.deb
 ```
 
-Alternatively, `debc` (from `devscripts`) can show all packages from the last
-build at once — run it without arguments from inside the source tree after
-`dpkg-buildpackage` completes:
-
-```sh
-debc
-```
-
-### 6. Install the packages locally
+### 6. Install the package locally
 
 A plain `dpkg -i` won't resolve virtual package dependencies
 (`opentelemetry-injector1` etc.).
@@ -254,7 +211,7 @@ echo "deb [trusted=yes] file:///tmp/otel-local-repo ./" \
   | sudo tee /etc/apt/sources.list.d/otel-local.list
 
 sudo apt update
-sudo apt install opentelemetry
+sudo apt install opentelemetry-injector
 ```
 
 ### 7. Verify the installation
@@ -263,7 +220,6 @@ sudo apt install opentelemetry
 grep libotelinject /etc/ld.so.preload
 ls /etc/opentelemetry/injector/conf.d/
 dpkg -s opentelemetry-injector
-dpkg -s opentelemetry
 ```
 
 ### 8. Run the DEP-8 autopkgtests locally
@@ -287,22 +243,19 @@ sudo autopkgtest -U ../*.deb -- lxd ubuntu-daily:stonking
 ### 9. Clean up
 
 ```sh
-sudo apt remove opentelemetry opentelemetry-injector \
-  opentelemetry-java-autoinstrumentation \
-  opentelemetry-nodejs-autoinstrumentation \
-  opentelemetry-dotnet-autoinstrumentation
+sudo apt remove opentelemetry-injector
 sudo rm /etc/apt/sources.list.d/otel-local.list
 sudo apt update
 rm -f ../*.deb ../*.dsc ../*.tar.* ../*.buildinfo ../*.changes
 ```
 
-### Upgrading a component version
+### Upgrading the injector version
 
-1. Update the version in `debian/versions.mk`.
-2. Run `debian/scripts/get-orig-source.sh` to download the new artifacts.
-3. Bump `SUITE_VERSION` in `debian/versions.mk` if this is a new suite release,
-   or just the Ubuntu revision in `debian/changelog`
-   (e.g. `0.1.0-0ubuntu1` → `0.1.0-0ubuntu2`) for a packaging-only change.
+1. Update `INJECTOR_VERSION` in `debian/versions.mk`.
+2. Run `debian/scripts/get-orig-source.sh` to download the new source.
+3. Bump the Ubuntu revision in `debian/changelog`
+   (e.g. `0.1.0-0ubuntu1` → `0.1.0-0ubuntu2`) for a packaging-only change,
+   or bump `SUITE_VERSION` for a new upstream version.
 4. Add a `debian/changelog` entry with `dch`.
 5. Rebuild with `dpkg-buildpackage -us -uc`.
 
@@ -312,29 +265,19 @@ rm -f ../*.deb ../*.dsc ../*.tar.* ../*.buildinfo ../*.changes
 The orig tarball is out of sync with the working tree.
 Re-run `debian/scripts/get-orig-source.sh` and retry.
 
-**`apt install opentelemetry` says "Unable to locate package".**
-Re-run `dpkg-scanpackages` from inside the repo directory and `sudo apt update` — the local repo index
-may be stale:
+**`apt install opentelemetry-injector` says "Unable to locate package".**
+Re-run `dpkg-scanpackages` from inside the repo directory and `sudo apt update`:
 
 ```sh
 ( cd /tmp/otel-local-repo && dpkg-scanpackages . | gzip -c > Packages.gz )
 sudo apt update
 ```
 
-**The metapackage installs but `opentelemetry-injector1` is unsatisfied.**
-The `Provides` field was not picked up by APT.
-Confirm the index was regenerated:
-
-```sh
-zcat /tmp/otel-local-repo/Packages.gz | grep -A5 "Package: opentelemetry-injector"
-```
-
 ## Versioning
 
 Package versions follow the Ubuntu convention `<upstream>-<debian>ubuntu<ubuntu>`:
 
-- `0.1.0` — the upstream version (our suite-level version, not tied to any
-  individual component release).
+- `0.1.0` — the upstream version (our suite-level version).
 - `-0` — the Debian revision; `0` because this package has never been in Debian.
 - `ubuntu1` — the Ubuntu packaging revision; incremented for each packaging-only
   change within the same upstream version.
@@ -347,21 +290,13 @@ A new upstream version would be `0.2.0-0ubuntu1`.
 
 This repository is a parallel Canonical implementation targeting the
 Launchpad/Ubuntu toolchain.
-The package architecture (virtual interface-versioned `Provides`,
-vendor-swappable language packages, POSIX-only lifecycle scripts) follows
-the design documented in the upstream
-[opentelemetry-packaging](https://github.com/open-telemetry/opentelemetry-packaging)
-repository (PR #10 and PR #18), which uses nfpm as its build tool.
+The upstream injector lives at
+[open-telemetry/opentelemetry-injector](https://github.com/open-telemetry/opentelemetry-injector).
 
 ## Path to Ubuntu universe
 
 The following work is required before submitting to Ubuntu universe:
 
-- Full `debian/copyright` audit of all bundled Node.js modules and
-  .NET managed assemblies.
-- Build remaining components from source (Java agent, Node.js bundle,
-  .NET native library) — the injector is already built from source
-  (see ADR-007).
 - `lintian --pedantic` clean output.
 - NEW queue submission via a Debian Developer sponsor.
 
