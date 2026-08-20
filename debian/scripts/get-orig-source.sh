@@ -7,13 +7,16 @@
 #
 # This script is the equivalent of the "get-orig-source" target in older
 # packaging workflows.  It must be run by the maintainer whenever the
-# injector version changes (i.e. when versions.mk is updated).
+# injector version changes in debian/changelog.
+#
+# The version is read from debian/changelog (the upstream version field,
+# i.e. everything before the first "-" in the version column).
 #
 # The resulting tarball is:
-#   ../opentelemetry-injector_<SUITE_VERSION>.orig.tar.gz
+#   ../opentelemetry-injector_<version>.orig.tar.gz
 #
 # Layout inside the tarball (what debian/rules will find at build time):
-#   opentelemetry-injector-<SUITE_VERSION>/
+#   opentelemetry-injector-<version>/
 #     upstream/
 #       injector/
 #         (source tree extracted from GitHub source tarball v<version>)
@@ -33,22 +36,20 @@ set -eu
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
 # ---------------------------------------------------------------------------
-# Load pinned versions from versions.mk
+# Determine the injector version from debian/changelog
 # ---------------------------------------------------------------------------
 
-# Parse versions.mk with shell (no make required).
-parse_version() {
-    grep "^$1 :=" "$REPO_ROOT/debian/versions.mk" | sed 's/.*:= *//'
-}
+# The first changelog line is:  opentelemetry-injector (<version>-<rev>) ...
+# Extract the version field between "(" and ")", then drop its trailing
+# Debian/Ubuntu revision (the part after the first "-").
+VERSION="$(sed -n '1{ s/.*(//; s/).*//; p; }' "$REPO_ROOT/debian/changelog" | sed 's/-.*//')"
+[ -n "$VERSION" ] || die "could not parse version from debian/changelog"
 
-SUITE_VERSION="$(parse_version SUITE_VERSION)"
-INJECTOR_VERSION="$(parse_version INJECTOR_VERSION)"
-
-TARBALL="$REPO_ROOT/../opentelemetry-injector_${SUITE_VERSION}.orig.tar.gz"
-STUB="opentelemetry-injector-${SUITE_VERSION}"
+TARBALL="$REPO_ROOT/../opentelemetry-injector_${VERSION}.orig.tar.gz"
+STUB="opentelemetry-injector-${VERSION}"
 
 printf 'Building orig tarball: %s\n' "$TARBALL"
-printf '  injector  %s\n' "$INJECTOR_VERSION"
+printf '  injector  %s\n' "$VERSION"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -74,9 +75,9 @@ mkdir -p "$UPSTREAM/injector"
 # Injector — source tarball (built from source during package build)
 # ---------------------------------------------------------------------------
 
-printf '\n=== opentelemetry-injector %s (source) ===\n' "$INJECTOR_VERSION"
+printf '\n=== opentelemetry-injector %s (source) ===\n' "$VERSION"
 
-INJECTOR_TARBALL="v${INJECTOR_VERSION}.tar.gz"
+INJECTOR_TARBALL="v${VERSION}.tar.gz"
 URL="https://github.com/open-telemetry/opentelemetry-injector/archive/refs/tags/${INJECTOR_TARBALL}"
 INJECTOR_TMP="$(mktemp -d)"
 download "$URL" "$INJECTOR_TMP/$INJECTOR_TARBALL"
@@ -84,7 +85,7 @@ download "$URL" "$INJECTOR_TMP/$INJECTOR_TARBALL"
 # Extract the source tarball; GitHub tarballs extract to <repo>-<version>/
 tar -xzf "$INJECTOR_TMP/$INJECTOR_TARBALL" -C "$INJECTOR_TMP"
 # Move contents from opentelemetry-injector-<version>/ to upstream/injector/
-mv "$INJECTOR_TMP/opentelemetry-injector-${INJECTOR_VERSION}"/* "$UPSTREAM/injector/"
+mv "$INJECTOR_TMP/opentelemetry-injector-${VERSION}"/* "$UPSTREAM/injector/"
 rm -rf "$INJECTOR_TMP"
 
 # ---------------------------------------------------------------------------

@@ -19,7 +19,7 @@ command -v docker >/dev/null || { echo "error: docker is required"; exit 1; }
 
 IMAGE=otel-local-lifecycle-deb
 docker build \
-    --build-arg BASE_IMAGE=debian:12 \
+    --build-arg BASE_IMAGE=ubuntu:26.10 \
     -f "$REPO_ROOT/packaging/tests/lifecycle/Dockerfile.deb" \
     -t "$IMAGE" \
     "$REPO_ROOT"

@@ -25,13 +25,12 @@ sudo apt install opentelemetry-injector
 debian/                  Standard Debian packaging metadata
   control                Source package + opentelemetry-injector binary stanza
   rules                  dh build rules; builds injector from source with Zig
-  versions.mk            Pinned injector version
   packaging/             Config files and lifecycle scripts
     common/
       injector/          injector.conf, default_env.conf
       scripts/           postinstall-injector.sh, preuninstall-injector.sh
   scripts/
-    get-orig-source.sh   Downloads pinned injector source, assembles orig tarball
+    get-orig-source.sh   Downloads injector source, assembles orig tarball
   tests/control          DEP-8 autopkgtests run by Launchpad
   tests/preload-management   Lifecycle test: /etc/ld.so.preload management
   tests/config-handling      Lifecycle test: conffile handling across remove/purge
@@ -60,7 +59,7 @@ This section walks through a full local build and install cycle.
 
 This package uses the `3.0 (quilt)` Debian source format.
 The orig tarball (`opentelemetry-injector_<version>.orig.tar.gz`) contains the
-injector source tree downloaded at the pinned version from `debian/versions.mk`:
+injector source tree downloaded at the version pinned in `debian/changelog`:
 
 - **Injector**: Source code (built from source using Zig during package build)
 
@@ -84,21 +83,22 @@ for details.
 sudo apt install debhelper devscripts dpkg-dev curl
 ```
 
-### 1. Pin the component version
+### 1. Check the component version
 
-Open `debian/versions.mk` and check the pinned version.
-To upgrade, update the version line and re-run step 2.
+The injector version is the upstream version field in `debian/changelog`.
+To upgrade, bump it there and re-run step 2.
 
 ```
-INJECTOR_VERSION := 0.9.0
+opentelemetry-injector (0.11.0-0ubuntu1) stonking; urgency=medium
+                      ^^^^^
 ```
 
 ### 2. Generate the orig tarball
 
-This downloads the pinned injector source and assembles
-`opentelemetry-injector_<SUITE_VERSION>.orig.tar.gz` one directory above the
+This downloads the injector source and assembles
+`opentelemetry-injector_<version>.orig.tar.gz` one directory above the
 repo root.
-Run once per version, or whenever you change a version in `debian/versions.mk`.
+Run once per version, or whenever you change the version in `debian/changelog`.
 
 ```sh
 debian/scripts/get-orig-source.sh
@@ -159,7 +159,7 @@ build directly without sbuild.
 First, unpack the orig tarball:
 
 ```sh
-tar -xzf ../opentelemetry-injector_0.1.0.orig.tar.gz --strip-components=1 --wildcards '*/upstream'
+tar -xzf ../opentelemetry-injector_0.11.0.orig.tar.gz --strip-components=1 --wildcards '*/upstream'
 ```
 
 Then build:
@@ -179,7 +179,7 @@ ls ../*.deb
 Expected output:
 
 ```
-../opentelemetry-injector_0.1.0-0ubuntu1_amd64.deb
+../opentelemetry-injector_0.11.0-0ubuntu1_amd64.deb
 ```
 
 ### 5. Inspect the package before installing
@@ -187,13 +187,13 @@ Expected output:
 `dpkg-deb -c` lists every file the package will install:
 
 ```sh
-dpkg-deb -c ../opentelemetry-injector_0.1.0-0ubuntu1_amd64.deb
+dpkg-deb -c ../opentelemetry-injector_0.11.0-0ubuntu1_amd64.deb
 ```
 
 `dpkg-deb -I` shows the package metadata (version, Provides, Depends, etc.):
 
 ```sh
-dpkg-deb -I ../opentelemetry-injector_0.1.0-0ubuntu1_amd64.deb
+dpkg-deb -I ../opentelemetry-injector_0.11.0-0ubuntu1_amd64.deb
 ```
 
 ### 6. Install the package locally
@@ -251,19 +251,17 @@ rm -f ../*.deb ../*.dsc ../*.tar.* ../*.buildinfo ../*.changes
 
 ### Upgrading the injector version
 
-1. Update `INJECTOR_VERSION` in `debian/versions.mk`.
+1. Bump the upstream version in `debian/changelog`
+   (e.g. `0.11.0-0ubuntu1` → `0.11.0-0ubuntu2` for a packaging-only change,
+   or `0.12.0-0ubuntu1` for a new upstream release).
 2. Run `debian/scripts/get-orig-source.sh` to download the new source.
-3. Bump the Ubuntu revision in `debian/changelog`
-   (e.g. `0.1.0-0ubuntu1` → `0.1.0-0ubuntu2`) for a packaging-only change,
-   or bump `SUITE_VERSION` for a new upstream version.
-4. Add a `debian/changelog` entry with `dch`.
-5. Rebuild with `dpkg-buildpackage -us -uc`.
+3. Rebuild with `dpkg-buildpackage -us -uc`.
 
 ### Troubleshooting
 
 **`dpkg-source: error: aborting due to unexpected upstream changes`**
-The orig tarball is out of sync with the working tree.
-Re-run `debian/scripts/get-orig-source.sh` and retry.
+Your `debian/changelog` version doesn't match the orig tarball in the parent
+directory. Re-run `debian/scripts/get-orig-source.sh` and retry.
 
 **`apt install opentelemetry-injector` says "Unable to locate package".**
 Re-run `dpkg-scanpackages` from inside the repo directory and `sudo apt update`:
@@ -277,13 +275,14 @@ sudo apt update
 
 Package versions follow the Ubuntu convention `<upstream>-<debian>ubuntu<ubuntu>`:
 
-- `0.1.0` — the upstream version (our suite-level version).
+- `0.11.0` — the upstream version, taken from `debian/changelog` and matching
+  the upstream injector release it packages.
 - `-0` — the Debian revision; `0` because this package has never been in Debian.
 - `ubuntu1` — the Ubuntu packaging revision; incremented for each packaging-only
   change within the same upstream version.
 
-So the first release is `0.1.0-0ubuntu1`.
-A packaging-only fix to that release would be `0.1.0-0ubuntu2`.
+So the first release is `0.11.0-0ubuntu1`.
+A packaging-only fix to that release would be `0.11.0-0ubuntu2`.
 A new upstream version would be `0.2.0-0ubuntu1`.
 
 ## Relationship to upstream

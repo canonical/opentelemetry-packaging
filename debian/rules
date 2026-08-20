@@ -6,9 +6,8 @@
 #export DH_VERBOSE = 1
 
 include /usr/share/dpkg/architecture.mk
-include $(CURDIR)/debian/versions.mk
 
-# The orig tarball unpacks to opentelemetry-injector-<SUITE_VERSION>/upstream/.
+# The orig tarball unpacks to opentelemetry-injector-<version>/upstream/.
 # All upstream artifacts are already present there — no network access needed.
 ORIG_UPSTREAM := $(CURDIR)/upstream
 PACKAGING     := $(CURDIR)/debian/packaging
