@@ -31,6 +31,7 @@ debian/                  Standard Debian packaging metadata
       scripts/           postinstall-injector.sh, preuninstall-injector.sh
   scripts/
     get-orig-source.sh   Downloads injector source, assembles orig tarball
+  watch                  uscan rules to detect new upstream injector releases
   tests/control          DEP-8 autopkgtests run by Launchpad
   tests/preload-management   Lifecycle test: /etc/ld.so.preload management
   tests/config-handling      Lifecycle test: conffile handling across remove/purge
@@ -250,6 +251,9 @@ rm -f ../*.deb ../*.dsc ../*.tar.* ../*.buildinfo ../*.changes
 ```
 
 ### Upgrading the injector version
+
+Check for new upstream releases with `uscan --report`; it compares the
+upstream tags against the version in `debian/changelog`.
 
 1. Bump the upstream version in `debian/changelog`
    (e.g. `0.11.0-0ubuntu1` → `0.11.0-0ubuntu2` for a packaging-only change,
