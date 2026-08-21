@@ -1,4 +1,4 @@
-Source: opentelemetry
+Source: opentelemetry-injector
 Section: utils
 Priority: optional
 Maintainer: Canonical Observability <observability@lists.launchpad.net>
@@ -32,82 +32,3 @@ Description: OpenTelemetry LD_PRELOAD-based automatic instrumentation injector
  If a future release breaks the conf.d contract it will provide
  opentelemetry-injector2 instead, and the package manager will block
  incompatible upgrades automatically.
-
-Package: opentelemetry-java-autoinstrumentation
-Architecture: all
-Depends:
- ${misc:Depends},
-Provides:
- opentelemetry-java-autoinstrumentation1,
-Suggests:
- opentelemetry-injector1,
- default-jre,
-Description: OpenTelemetry Java Auto-Instrumentation Agent
- Packages the pre-built OpenTelemetry Java agent JAR from the upstream
- opentelemetry-java-instrumentation project.
- The JAR is installed at /usr/lib/opentelemetry/java/opentelemetry-javaagent.jar
- and a conf.d drop-in file is installed so that the opentelemetry-injector
- can activate it automatically for Java processes.
- .
- No files are downloaded at package installation time.
-
-Package: opentelemetry-nodejs-autoinstrumentation
-Architecture: all
-Depends:
- ${misc:Depends},
- nodejs (>= 18),
-Provides:
- opentelemetry-nodejs-autoinstrumentation1,
-Suggests:
- opentelemetry-injector1,
-Description: OpenTelemetry Node.js Auto-Instrumentation
- Packages the pre-built @opentelemetry/auto-instrumentations-node npm bundle
- from the upstream opentelemetry-js project.
- The node_modules tree is installed at /usr/lib/opentelemetry/nodejs/ and a
- conf.d drop-in file is installed so that the opentelemetry-injector can
- activate it automatically for Node.js processes.
- .
- No files are downloaded at package installation time.
-
-Package: opentelemetry-dotnet-autoinstrumentation
-Architecture: amd64 arm64
-Depends:
- ${misc:Depends},
- ${shlibs:Depends},
-Provides:
- opentelemetry-dotnet-autoinstrumentation1,
-Suggests:
- opentelemetry-injector1,
-Description: OpenTelemetry .NET Automatic Instrumentation
- Packages the pre-built OpenTelemetry .NET Automatic Instrumentation binaries
- for both glibc and musl libc flavours.
- The shared managed assemblies are installed once under
- /usr/lib/opentelemetry/dotnet/ and the native profiler library
- (OpenTelemetry.AutoInstrumentation.Native.so) is provided in both
- linux-x64/ (glibc) and linux-musl-x64/ (musl) subdirectories.
- .
- No files are downloaded at package installation time.
-
-Package: opentelemetry
-Architecture: all
-Depends:
- ${misc:Depends},
- opentelemetry-injector1,
-Recommends:
- opentelemetry-java-autoinstrumentation1,
- opentelemetry-nodejs-autoinstrumentation1,
- opentelemetry-dotnet-autoinstrumentation1,
-Description: Auto-instrumentation suite for distributed tracing (metapackage)
- A metapackage that installs the complete OpenTelemetry auto-instrumentation
- suite for Linux hosts: the LD_PRELOAD injector and language agents for Java,
- Node.js, and .NET.
- .
- Installing this package with:
-   apt install opentelemetry
- is the recommended way to enable full auto-instrumentation on a host.
- .
- The injector is a hard dependency (Depends) because the metapackage is
- useless without it.
- Language agents are Recommends so that a user who does not need a specific
- language can remove it without tearing out the metapackage or leaving the
- remaining agents unprotected from autoremove.

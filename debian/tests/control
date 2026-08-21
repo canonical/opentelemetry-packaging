@@ -19,56 +19,10 @@ Test-Command: objdump -f /usr/lib/opentelemetry/injector/libotelinject.so
 Depends: opentelemetry-injector, binutils
 
 # ---------------------------------------------------------------------------
-# opentelemetry-java-autoinstrumentation
-# ---------------------------------------------------------------------------
-
-Test-Command: test -f /usr/lib/opentelemetry/java/opentelemetry-javaagent.jar && test -f /etc/opentelemetry/injector/conf.d/java.conf && test -f /etc/opentelemetry/java/otel-sdk-config.yaml
-Depends: opentelemetry-java-autoinstrumentation
-
-Test-Command: file /usr/lib/opentelemetry/java/opentelemetry-javaagent.jar | grep -q "Java archive"
-Depends: opentelemetry-java-autoinstrumentation, file
-
-Test-Command: grep -q opentelemetry-javaagent.jar /etc/opentelemetry/injector/conf.d/java.conf
-Depends: opentelemetry-java-autoinstrumentation
-
-# ---------------------------------------------------------------------------
-# opentelemetry-nodejs-autoinstrumentation
-# ---------------------------------------------------------------------------
-
-Test-Command: test -d /usr/lib/opentelemetry/nodejs/node_modules/@opentelemetry/auto-instrumentations-node && test -f /etc/opentelemetry/injector/conf.d/nodejs.conf && test -f /etc/opentelemetry/nodejs/otel-sdk-config.yaml
-Depends: opentelemetry-nodejs-autoinstrumentation
-
-Test-Command: ENTRY="$(grep nodejs_auto_instrumentation_agent_path /etc/opentelemetry/injector/conf.d/nodejs.conf | cut -d= -f2)"; test -n "$ENTRY" && test -f "$ENTRY"
-Depends: opentelemetry-nodejs-autoinstrumentation
-
-# ---------------------------------------------------------------------------
-# opentelemetry-dotnet-autoinstrumentation
-# ---------------------------------------------------------------------------
-
-Test-Command: test -d /usr/lib/opentelemetry/dotnet && test -f /etc/opentelemetry/injector/conf.d/dotnet.conf && test -f /etc/opentelemetry/dotnet/otel-sdk-config.yaml
-Depends: opentelemetry-dotnet-autoinstrumentation
-
-Test-Command: test -f /usr/lib/opentelemetry/dotnet/linux-x64/OpenTelemetry.AutoInstrumentation.Native.so || test -f /usr/lib/opentelemetry/dotnet/linux-arm64/OpenTelemetry.AutoInstrumentation.Native.so
-Depends: opentelemetry-dotnet-autoinstrumentation
-
-# ---------------------------------------------------------------------------
-# opentelemetry (metapackage)
-# ---------------------------------------------------------------------------
-
-Test-Command: dpkg -l opentelemetry-injector | grep -q '^ii'
-Depends: opentelemetry
-
-Test-Command: test -f /usr/share/doc/opentelemetry/README
-Depends: opentelemetry
-
-# ---------------------------------------------------------------------------
 # Lifecycle tests
 # ---------------------------------------------------------------------------
 # These tests exercise package install/remove/purge behavior and require
 # root privileges and an isolated testbed because they modify system state.
-#
-# This section aims to be an autopkgtest rewrite of relevant upstream tests:
-# https://github.com/open-telemetry/opentelemetry-packaging/tree/main/packaging/tests/lifecycle
 
 Tests: preload-management
 Depends: opentelemetry-injector

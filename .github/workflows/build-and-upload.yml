@@ -46,6 +46,9 @@ jobs:
             dput-ng \
             gnupg
 
+      - name: Generate orig tarball
+        run: debian/scripts/get-orig-source.sh
+
       - name: Import GPG key
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:

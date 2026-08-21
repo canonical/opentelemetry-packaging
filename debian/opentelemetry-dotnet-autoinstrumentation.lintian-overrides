@@ -1,3 +1,0 @@
-# The musl native libraries are pre-built binaries from upstream that cannot
-# be stripped on a glibc build host (strip/objcopy don't work with musl libc).
-opentelemetry-dotnet-autoinstrumentation: unstripped-binary-or-object [usr/lib/opentelemetry/dotnet/musl/*]

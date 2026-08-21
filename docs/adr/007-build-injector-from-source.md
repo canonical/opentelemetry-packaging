@@ -5,12 +5,9 @@ Status: Accepted
 
 ## Context
 
-ADR-001 established that the initial PPA release would bundle pre-built
-upstream binaries, deferring source builds to the Ubuntu universe path.
-The `opentelemetry-injector` package currently ships a pre-built
-`libotelinject.so` downloaded from GitHub releases.
-
-The injector is written in Zig (not Go, as ADR-001 incorrectly states).
+The `opentelemetry-injector` package ships `libotelinject.so`, the LD_PRELOAD
+library that performs automatic instrumentation injection.
+The injector is written in Zig.
 Building from source requires the Zig compiler.
 
 Zig availability in Ubuntu:
@@ -46,9 +43,6 @@ Key choices:
 5. **Tests**: Run `make zig-unit-tests` during the build to catch issues
    early, following Debian best practice.
 
-6. **Other components**: Java, Node.js, and .NET packages remain pre-built
-   binaries. This ADR covers only the injector.
-
 ## Consequences
 
 **Build dependencies change**:
@@ -56,12 +50,11 @@ Key choices:
 The `opentelemetry-injector` package gains a build dependency on `zig0.15`.
 The `Build-Depends` field in `debian/control` must be updated.
 
-**Source tarball structure changes**:
+**Source tarball structure**:
 
-The orig tarball will contain injector source code under `upstream/injector/`
-instead of pre-built `.so` files. The `debian/scripts/get-orig-source.sh`
-script must be updated to fetch the GitHub source tarball instead of release
-binaries.
+The orig tarball contains injector source code under `upstream/injector/`.
+The `debian/scripts/get-orig-source.sh` script fetches the GitHub source
+tarball instead of pre-built release binaries.
 
 **`debian/rules` changes**:
 
@@ -70,7 +63,7 @@ binaries.
 - `override_dh_auto_test`: Run `make zig-unit-tests` in `upstream/injector/`
   with the same `PATH` modification.
 - `override_dh_auto_install`: Copy from `upstream/injector/so/libotelinject.so`
-  instead of `upstream/injector/libotelinject_amd64.so`.
+  (the build output).
 
 **Ubuntu 24.04 users**:
 
@@ -78,15 +71,9 @@ Users on Ubuntu 24.04 LTS cannot use this package. They can use the upstream
 nfpm-built packages from GitHub releases, or wait for a potential backport
 if Zig becomes available via a PPA.
 
-**Progress toward universe**:
-
-This is the first component to be built from source, reducing the pre-built
-binary footprint. The Java agent, Node.js bundle, and .NET assemblies remain
-as future work items for the universe path.
-
 **Lintian errors deferred**:
 
-Lintian errors are not blockers for the PPA but must be resolved before Ubuntu 
+Lintian errors are not blockers for the PPA but must be resolved before Ubuntu
 universe submission.
 
 For PPA builds, lintian can be skipped with `--no-run-lintian` (sbuild) or
