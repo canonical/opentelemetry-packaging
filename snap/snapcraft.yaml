@@ -1,17 +1,31 @@
-name: opentelemetry-snap-poc # you probably want to 'snapcraft register <name>'
-base: core26 # the base snap is the execution environment for this snap
-version: '0.1' # just for humans, typically '1.2+git' or '1.3.2'
-summary: Single-line elevator pitch for your amazing snap # 79 char long summary
+name: opentelemetry-snap-poc
+base: core22
+version: '0.0.3'
+summary: OpenTelemetry auto-instrumentation injector for Java and Python
 description: |
-  This is my-snap's description. You have a paragraph or two to tell the
-  most important story about your snap. Keep it under 100 words though,
-  we live in tweetspace and your description wants to look good in the snap
-  store.
+  System-wide OpenTelemetry auto-instrumentation for Java and Python.
+  Installs a shared library via /etc/ld.so.preload that automatically
+  instruments JVM and Python processes with OpenTelemetry agents.
 
-grade: devel # must be 'stable' to release into candidate/stable channels
-confinement: devmode # use 'strict' once you have the right plugs and slots
+grade: devel
+confinement: classic
+
+architectures:
+  - build-on: amd64
 
 parts:
-  my-part:
-    # See 'snapcraft plugins'
-    plugin: nil
+  debs:
+    plugin: dump
+    source: https://github.com/open-telemetry/opentelemetry-packaging/releases/download/v0.0.3/
+    source-type: local
+    override-pull: |
+      mkdir -p $CRAFT_PART_SRC
+      cd $CRAFT_PART_SRC
+      wget https://github.com/open-telemetry/opentelemetry-packaging/releases/download/v0.0.3/opentelemetry-injector_0.0.3_amd64.deb
+      wget https://github.com/open-telemetry/opentelemetry-packaging/releases/download/v0.0.3/opentelemetry-java-autoinstrumentation_0.0.3_all.deb
+      wget https://github.com/open-telemetry/opentelemetry-packaging/releases/download/v0.0.3/opentelemetry-python-autoinstrumentation_0.0.3_amd64.deb
+    override-build: |
+      mkdir -p $CRAFT_PART_INSTALL/debs
+      cp $CRAFT_PART_SRC/*.deb $CRAFT_PART_INSTALL/debs/
+    build-packages:
+      - wget

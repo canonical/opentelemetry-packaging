@@ -1,0 +1,7 @@
+#!/bin/sh
+# OpenTelemetry Snap Remove Hook
+# Removes the installed deb packages
+
+set -e
+
+apt remove -y opentelemetry-injector opentelemetry-java-autoinstrumentation opentelemetry-python-autoinstrumentation

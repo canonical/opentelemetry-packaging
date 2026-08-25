@@ -1,0 +1,7 @@
+#!/bin/sh
+# OpenTelemetry Snap Install Hook
+# Simply installs the bundled deb packages using apt
+
+set -e
+
+apt install -y "$SNAP/debs/"*.deb
