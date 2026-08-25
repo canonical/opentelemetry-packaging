@@ -1,0 +1,4 @@
+https://github.com/open-telemetry/opentelemetry-packaging/releases/download/v0.0.3/opentelemetry-injector_0.0.3_amd64.deb
+https://github.com/open-telemetry/opentelemetry-packaging/releases/download/v0.0.3/opentelemetry-java-autoinstrumentation_0.0.3_all.deb
+https://github.com/open-telemetry/opentelemetry-packaging/releases/download/v0.0.3/opentelemetry-python-autoinstrumentation_0.0.3_amd64.deb
+
