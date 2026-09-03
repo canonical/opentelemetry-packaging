@@ -1,11 +1,5 @@
 opentelemetry-injector (0.11.0-0ubuntu1) stonking; urgency=medium
 
-  * Initial packaging of the OpenTelemetry LD_PRELOAD injector for Ubuntu
-    Stonking (26.10).
-  * Builds libotelinject.so from source using Zig (ADR-007).
-  * Source package renamed from opentelemetry to opentelemetry-injector;
-    language-agent and metapackage components removed.
-  * Package version now tracks the upstream injector release (0.11.0)
-    instead of using a separate suite-level version.
+  * Initial packaging of the OpenTelemetry Injector. (LP: #2160027)
 
  -- Canonical Observability <observability@lists.launchpad.net>  Tue, 18 Aug 2026 00:00:00 +0000
