@@ -1,0 +1,419 @@
+## OpenTelemetry Injector
+
+> [!IMPORTANT]
+> **The DEB and RPM packages for the OpenTelemetry Injector have moved.**
+> They are now built and released from
+> [open-telemetry/opentelemetry-packaging](https://github.com/open-telemetry/opentelemetry-packaging).
+> Download the latest `.deb` / `.rpm` from that repository's
+> [releases page](https://github.com/open-telemetry/opentelemetry-packaging/releases).
+>
+> This repository publishes only the raw `libotelinject.so` shared library.
+> Please open packaging bugs and feature requests against `opentelemetry-packaging`.
+
+The OpenTelemetry injector is a shared library (written in [Zig](https://ziglang.org/)) that is intended to be
+used via the environment variable [`LD_PRELOAD`](https://man7.org/linux/man-pages/man8/ld.so.8.html#ENVIRONMENT), the
+[`/etc/ld.so.preload`](https://man7.org/linux/man-pages/man8/ld.so.8.html#FILES) file, or similar mechanisms to inject
+environment variables into processes at startup.
+
+It serves two main purposes:
+* Inject an OpenTelemetry auto-instrumentation agent into the process to capture and report distributed traces and
+  metrics to the [OpenTelemetry Collector](https://opentelemetry.io/docs/collector/) for supported runtimes.
+* Set resource attributes automatically (for example Kubernetes related resource attributes and service related
+  resource attributes in environments where this is applicable).
+
+The injector can be used to enable automatic zero-touch instrumentation of processes.
+For this to work, the injector binary needs to be bundled together with the OpenTelemetry auto-instrumentation agents
+for the target runtimes.
+
+Official RPM and DEB packages that bundle the injector together with auto-instrumentation
+agents for supported runtimes are built and published from the
+[open-telemetry/opentelemetry-packaging](https://github.com/open-telemetry/opentelemetry-packaging) repository.
+The OpenTelemetry injector Debian/RPM packages install the OpenTelemetry auto-instrumentation agents, the
+`libotelinject.so` shared object library, and a default configuration file to automatically instrument applications and
+services to capture and report distributed traces and metrics to the
+[OpenTelemetry Collector](https://opentelemetry.io/docs/collector/).
+This repository publishes only the raw `libotelinject.so` shared library.
+
+The `opentelemetry-injector` deb/rpm package installs and supports configuration of the following auto-instrumentation
+agents:
+
+- [Java](https://opentelemetry.io/docs/zero-code/java/)
+- [Node.js](https://opentelemetry.io/docs/zero-code/js/)
+- [.NET](https://opentelemetry.io/docs/zero-code/dotnet/)
+- [Ruby](https://github.com/open-telemetry/opentelemetry-ruby-instrumentation)
+- Python (disabled by default, see [Enabling Auto-Instrumentation for Python](#enabling-auto-instrumentation-for-python))
+
+## Activation and Configuration
+
+This method requires `root` privileges.
+
+1. Add the path of the provided `/usr/lib/opentelemetry/libotelinject.so` shared object library to the
+   [`/etc/ld.so.preload`](https://man7.org/linux/man-pages/man8/ld.so.8.html#FILES) file to activate auto-
+   instrumentation for ***all*** supported processes on the system. For example:
+   ```
+   echo /usr/lib/opentelemetry/libotelinject.so >> /etc/ld.so.preload
+   ```
+   Alternatively, set the environment variable `LD_PRELOAD=/usr/lib/opentelemetry/libotelinject.so` for a specific
+   process to activate auto-instrumentation for that process. For example:
+   ```
+   LD_PRELOAD=/usr/lib/opentelemetry/libotelinject.so node myapp.js
+   ```
+2. The default configuration file `/etc/opentelemetry/injector/injector.conf` includes the required settings, i.e. the paths to
+   the respective auto-instrumentation agents per runtime:
+   ```
+   dotnet_auto_instrumentation_agent_path_prefix=/usr/lib/opentelemetry/dotnet
+   jvm_auto_instrumentation_agent_path=/usr/lib/opentelemetry/jvm/javaagent.jar
+   nodejs_auto_instrumentation_agent_path=/usr/lib/opentelemetry/nodejs/node_modules/@opentelemetry/auto-instrumentations-node/build/src/register.js
+   ```
+
+   You can override the location of the configuration file by setting `OTEL_INJECTOR_CONFIG_FILE`.
+
+   You may want to modify this file for a couple of reasons:
+   - You want to provide your own instrumentation files.
+
+   - You want to selectively disable auto-instrumentation, either for all runtimes or for a subset of runtimes.
+     See
+     [Disabling auto-instrumentation for all runtimes or specific runtimes](#disabling-auto-instrumentation-for-all-runtimes-or-specific-runtimes)
+     for more information.
+   - You want to selectively enable (or disable) auto-instrumentation for a subset of programs (services) on your system.
+     For example, you may want to only enable instrumentation of services that match a specific executable path pattern, or
+     to programs that do not contain certain arguments on the command line.
+     See [details on configuring the program inclusion and exclusion criteria](#details-on-configuring-the-program-inclusion-and-exclusion-criteria) for more information.
+
+   The values set in the configuration file can be overridden with environment variables.
+   - `DOTNET_AUTO_INSTRUMENTATION_AGENT_PATH_PREFIX`: the path to the directory containing the .NET auto-instrumentation
+     agent files
+   - `DOTNET_AUTO_INSTRUMENTATION_MINIMUM_DOTNET_MAJOR_VERSION`: the minimum .NET major version an application (as
+     determined by inspecting its `*.runtimeconfig.json` file) needs to target to be eligible for .NET
+     auto-instrumentation; can also be set via the configuration file key
+     `dotnet_auto_instrumentation_minimum_dotnet_major_version`. The default is `8`, matching the .NET versions
+     supported by the upstream OpenTelemetry .NET auto-instrumentation. Distributions of the .NET
+     auto-instrumentation that support older .NET versions can lower this threshold accordingly.
+   - `JVM_AUTO_INSTRUMENTATION_AGENT_PATH`: the path to the Java auto-instrumentation agent JAR file
+   - `NODEJS_AUTO_INSTRUMENTATION_AGENT_PATH`: the path to the Node.js auto-instrumentation agent registration file
+   - `PYTHON_AUTO_INSTRUMENTATION_AGENT_PATH_PREFIX`: the path to the directory containing the Python auto-instrumentation agent files (Python is disabled by default, see [Enabling Auto-Instrumentation for Python](#enabling-auto-instrumentation-for-python))
+   - `RUBY_AUTO_INSTRUMENTATION_AGENT_PATH_PREFIX`: the path to the directory containing the Ruby auto-instrumentation gem bundle
+   - `OTEL_INJECTOR_INCLUDE_PATHS`: a comma-separated list of glob patterns to match executable paths
+   - `OTEL_INJECTOR_EXCLUDE_PATHS`: a comma-separated list of glob patterns to exclude executable paths
+   - `OTEL_INJECTOR_INCLUDE_WITH_ARGUMENTS`: a comma-separated list of glob patterns to match process arguments
+   - `OTEL_INJECTOR_EXCLUDE_WITH_ARGUMENTS`: a comma-separated list of glob patterns to exclude process arguments
+   - `OTEL_INJECTOR_AUTO_INSTRUMENTATION_DISABLED`: either `*` to disable all auto-instrumentation for all runtimes,
+     or a comma-separated list of runtimes for which to disable auto-instrumentation, see
+     [Disabling auto-instrumentation for all runtimes or specific runtimes](#disabling-auto-instrumentation-for-all-runtimes-or-specific-runtimes)
+
+3. (Optional) The default env agent configuration file `/etc/opentelemetry/injector/default_env.conf` is empty (use
+   `all_auto_instrumentation_agents_env_path` option to specify a different path). Environment variables added to this file
+   will be passed to all agents' environments. **NOTE**: by default, environment variables which do not start with
+   `OTEL_` are ignored. If you need to allow additional prefixes in a custom build, compile the injector with
+   `zig build -Dallowed-env-var-prefixes=OTEL_,CUSTOM_PREFIX_`. This setting is build-time only.
+
+   The `auto_instrumentation_env.conf` file format is the same as other configurations:
+
+   ```
+   OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4317
+   OTEL_PROPAGATORS=tracecontext,baggage
+   ```
+
+4. Reboot the system or restart the applications/services for any changes to take effect. The `libotelinject.so` shared
+   object library will then be preloaded for all subsequent processes and inject the environment variables from the
+   `/etc/opentelemetry/injector/injector.conf` configuration files for the process types you've configured (Java, .Net, Node.js or Ruby).
+
+When providing your own instrumentation files (for example via environment variables like `DOTNET_AUTO_INSTRUMENTATION_AGENT_PATH_PREFIX`) the following directory structure is expected:
+- `JVM_AUTO_INSTRUMENTATION_AGENT_PATH`: This path must point to the Java auto-instrumentation agent JAR file `opentelemetry-javaagent.jar`.
+- `NODEJS_AUTO_INSTRUMENTATION_AGENT_PATH`: The path to an installation of the npm module `@opentelemetry/auto-instrumentations-node`.
+- `RUBY_AUTO_INSTRUMENTATION_AGENT_PATH_PREFIX`: this path must be a directory containing `glibc` and `musl` subdirectories. Depending on the libc flavor that the injector detects at startup, the matching subdirectory (a gem home with the `opentelemetry-auto-instrumentation.rb` entry point) is used.
+- `DOTNET_AUTO_INSTRUMENTATION_AGENT_PATH_PREFIX`: this path must be a directory that contains the following
+  subdirectories and files:
+   - For `x86_64` systems using `glibc`:
+      - `glibc/linux-x64/OpenTelemetry.AutoInstrumentation.Native.so`
+      - `glibc/AdditionalDeps`
+      - `glibc/store`
+      - `glibc/net/OpenTelemetry.AutoInstrumentation.StartupHook.dll`
+   - For `x86_64` systems using `musl`:
+       - `musl/linux-musl-x64/OpenTelemetry.AutoInstrumentation.Native.so`
+       - `musl/AdditionalDeps`
+       - `musl/store`
+       - `musl/net/OpenTelemetry.AutoInstrumentation.StartupHook.dll`
+   - For `arm64` systems using `glibc`:
+       - `glibc/linux-arm64/OpenTelemetry.AutoInstrumentation.Native.so`
+       - `glibc/AdditionalDeps`
+       - `glibc/store`
+       - `glibc/net/OpenTelemetry.AutoInstrumentation.StartupHook.dll`
+   - For `arm` systems using `musl`:
+       - `musl/linux-musl-arm64/OpenTelemetry.AutoInstrumentation.Native.so`
+       - `musl/AdditionalDeps`
+       - `musl/store`
+       - `musl/net/OpenTelemetry.AutoInstrumentation.StartupHook.dll`
+
+Note that the defaults provided by the RPM and Debian packages from
+[open-telemetry/opentelemetry-packaging](https://github.com/open-telemetry/opentelemetry-packaging) take care of all of that, and it is not necessary to edit `/etc/opentelemetry/injector/injector.conf` or set any of the above environment variables.
+
+Check the following for details about the auto-instrumentation agents and further configuration options:
+- [Java](https://opentelemetry.io/docs/zero-code/java/agent/configuration/)
+- [Node.js](https://opentelemetry.io/docs/zero-code/js/configuration/)
+- [.NET](https://opentelemetry.io/docs/zero-code/dotnet/configuration/)
+- [Ruby](https://github.com/open-telemetry/opentelemetry-ruby-instrumentation)
+
+### Environment Modifications
+
+Here is an overview of the modifications that the injector will apply:
+
+* It sets (or appends to) `NODE_OPTIONS` to activate the Node.js instrumentation agent.
+* It sets (or prepends to) `RUBYOPT` to require the Ruby auto-instrumentation gem, and sets `OTEL_RUBY_ADDITIONAL_GEM_PATH` so the gem can locate its bundled dependencies. If `OTEL_RUBY_ADDITIONAL_GEM_PATH` is already set in the process's environment, the injector respects that value and also skips modifying `RUBYOPT` (the two variables are a coupled pair — injecting only the `-r` flag would make the gem look for its dependencies in the user-provided path and fail with `LoadError`).
+* It adds a `-javaagent` flag to `JAVA_TOOL_OPTIONS` to activate the Java OTel SDK.
+* It conditionally sets the required environment variables for activating the OpenTelemetry SDK for .NET:
+    * `CORECLR_ENABLE_PROFILING`
+    * `CORECLR_PROFILER`
+    * `CORECLR_PROFILER_PATH`
+    * `DOTNET_ADDITIONAL_DEPS`
+    * `DOTNET_SHARED_STORE`
+    * `DOTNET_STARTUP_HOOKS`
+    * `OTEL_DOTNET_AUTO_HOME`
+    * Note that the injector will not append to existing environment variables but overwrite them unconditionally if
+      they are already set.
+      In contrast to other runtimes, .NET does not support adding multiple agents.
+    * The injector first inspects the adjacent `*.runtimeconfig.json` file of the target application when it is
+      available.
+    * The injector stands down if the specified runtime version does not target a supported .NET version. By
+      default, the minimum supported .NET major version is 8, matching the .NET versions supported by the upstream
+      OpenTelemetry .NET auto-instrumentation; it can be changed via the configuration file key
+      `dotnet_auto_instrumentation_minimum_dotnet_major_version` or the environment variable
+      `DOTNET_AUTO_INSTRUMENTATION_MINIMUM_DOTNET_MAJOR_VERSION`.
+    * If the `.runtimeconfig.json` file is missing, unreadable, malformed, or missing the expected fields, the
+      injector proceeds with additional .NET checks.
+    * To reduce the risk of double-instrumentation, the injector then inspects the adjacent `*.deps.json` file of the
+      target application when it is available.
+    * The injector stands down if that `.deps.json` file already references `OpenTelemetry*` packages.
+    * If the `.deps.json` file is missing, unreadable, malformed, or missing the expected fields, the
+      injector proceeds with .NET injection.
+* It inspects specific existing environment variables and populates `OTEL_RESOURCE_ATTRIBUTES` with additional resource
+  attributes. These environment variables need to be set externally (for example by a Kubernetes operator with a mutating
+  webhook on the pod spec template of the workload). If `OTEL_RESOURCE_ATTRIBUTES` is already set, the additional
+  key-value pairs are appended to the existing value of `OTEL_RESOURCE_ATTRIBUTES`. Existing key-value pairs are not
+  overwritten, that is if e.g. `OTEL_RESOURCE_ATTRIBUTES` already has a key-value pair for `k8s.pod.name`, the existing
+  key-value pair takes priority.
+  The following environment variables and resource attributes are supported:
+    * `OTEL_INJECTOR_RESOURCE_ATTRIBUTES` is expected to contain key-value pairs
+      (e.g. `my.resource.attribute=value,my.other.resource.attribute=another-value`) and will be added as-is.
+    * `OTEL_INJECTOR_SERVICE_NAME` will be translated to `service.name`
+    * `OTEL_INJECTOR_SERVICE_VERSION` will be translated to `service.version`
+    * `OTEL_INJECTOR_SERVICE_NAMESPACE` will be translated to `service.namespace`
+    * `OTEL_INJECTOR_K8S_NAMESPACE_NAME` will be translated to `k8s.namespace.name`
+    * `OTEL_INJECTOR_K8S_POD_NAME` will be translated to `k8s.pod.name`
+    * `OTEL_INJECTOR_K8S_POD_UID` will be translated to `k8s.pod.uid`
+    * `OTEL_INJECTOR_K8S_CONTAINER_NAME` will be translated to `k8s.container.name`
+
+#### Mapping Kubernetes Resource Attributes
+
+While you can set all resource attributes with `OTEL_INJECTOR_RESOURCE_ATTRIBUTES`, the additional environment
+variables controlling individual resource attributes (like `OTEL_INJECTOR_SERVICE_NAME` or
+`OTEL_INJECTOR_K8S_NAMESPACE_NAME`) are useful in Kubernetes for deriving resource attributes via
+[field selectors](https://kubernetes.io/docs/tasks/inject-data-application/environment-variable-expose-pod-information/#use-pod-fields-as-values-for-environment-variables),
+e.g. by adding a snippet like this to the pod spec template:
+```
+- name: OTEL_INJECTOR_SERVICE_NAME
+  valueFrom:
+    fieldRef:
+      fieldPath: metadata.labels['app.kubernetes.io/name']
+```
+
+The following provides an overview of the intended mappings:
+
+| Environment Variable               | Intended Mapping |
+| ---------------------------------- | ---------------- |
+| `OTEL_INJECTOR_K8S_NAMESPACE_NAME` | `valueFrom.fieldRef.fieldPath: metadata.namespace` |
+| `OTEL_INJECTOR_K8S_POD_NAME`       | `valueFrom.fieldRef.fieldPath: metadata.name` |
+| `OTEL_INJECTOR_K8S_POD_UID`        | `valueFrom.fieldRef.fieldPath: metadata.uid` |
+| `OTEL_INJECTOR_K8S_CONTAINER_NAME` | The container's name (no field selector) |
+| `OTEL_INJECTOR_SERVICE_NAME`       | `valueFrom.fieldRef.fieldPath: metadata.labels['app.kubernetes.io/name']` |
+| `OTEL_INJECTOR_SERVICE_VERSION`    | `valueFrom.fieldRef.fieldPath: metadata.labels['app.kubernetes.io/version']` |
+| `OTEL_INJECTOR_SERVICE_NAMESPACE`  | `valueFrom.fieldRef.fieldPath: metadata.labels['app.kubernetes.io/part-of']` |
+
+The environment variable `OTEL_INJECTOR_RESOURCE_ATTRIBUTES` can be set to key-value pairs derived from the
+annotations `resource.opentelemetry.io/*`, to support mapping annotations like
+`resource.opentelemetry.io/service.namespace`, `resource.opentelemetry.io/service.name` to their respective resource
+attributes.
+
+See also:
+* https://opentelemetry.io/docs/specs/semconv/resource/k8s/
+* https://opentelemetry.io/docs/specs/semconv/non-normative/k8s-attributes/
+* https://kubernetes.io/docs/tasks/inject-data-application/environment-variable-expose-pod-information/#use-pod-fields-as-values-for-environment-variables
+
+### Enabling Auto-Instrumentation for Python
+
+Python auto-instrumentation is currently disabled by default and no default Python auto-instrumentation agent is
+included in the system packages.
+
+Python instrumentation needs to be enabled explicitly by providing a Python auto-instrumentation agent and a
+custom injector.conf file with python_auto_instrumentation_agent_path_prefix set or by setting
+PYTHON_AUTO_INSTRUMENTATION_AGENT_PATH_PREFIX.
+The configured path is expected to contain two directories, `glibc` and `musl`.
+Depending on the libc flavor that the injector detects at startup, either the `glibc` or the `musl` directory will be
+prepended to `PYTHONPATH`, and thus loaded first by the Python interpreter.
+
+Be aware that it is not always safe to inject the additional Python packages due to possible dependency conflicts.
+
+### Configure the Injector's Logging
+
+By default, the injector only logs errors.
+Set the environment variable `OTEL_INJECTOR_LOG_LEVEL` to change the log level.
+Valid values are:
+- `debug`
+- `info`
+- `warn`
+- `error` - this is the default value
+- `none` - suppress all log output from the injector; this is useful for scenarios where you pipe `stderr` into another
+  process and parse it.
+
+The injector's log message will be written to `stderr` of the process that is being instrumented.
+
+### Details on configuring the program inclusion and exclusion criteria
+
+If you want to selectively enable (or disable) auto-instrumentation for a subset of programs (services) on your system,
+the configuration file provides a couple of settings which can be used alone or in combination to produce
+the desired outcome.
+
+By default, all processes are instrumented. Each non-empty include setting adds a condition that a process
+must satisfy to be instrumented — all such conditions must be met (AND across settings). Within a single
+setting, entries are ORed: any one matching pattern is sufficient to satisfy that setting. Exclusions take
+precedence over inclusions.
+
+  - `include_paths` - A comma-separated list of glob patterns to match executable paths.
+  - `exclude_paths` - A comma-separated list of glob patterns to exclude executable paths.
+  - `include_with_arguments` - A comma-separated list of glob patterns to match process arguments.
+  - `exclude_with_arguments` - A comma-separated list of glob patterns to exclude process arguments.
+
+For example, in the following configuration, all program executables in the
+`/app/system/` directory will not be instrumented, even though the `/app` directory is
+included for instrumentation:
+```
+dotnet_auto_instrumentation_agent_path_prefix=/usr/lib/opentelemetry/dotnet
+jvm_auto_instrumentation_agent_path=/usr/lib/opentelemetry/jvm/javaagent.jar
+nodejs_auto_instrumentation_agent_path=/usr/lib/opentelemetry/nodejs/node_modules/@opentelemetry/auto-instrumentations-node/build/src/register.js
+
+include_paths=/app/*,/utilities/*
+exclude_paths=/app/system/*
+```
+To give you an idea of what types of inclusion and exclusion criteria can be defined, let's
+look at the following example:
+```
+dotnet_auto_instrumentation_agent_path_prefix=/usr/lib/opentelemetry/dotnet
+jvm_auto_instrumentation_agent_path=/usr/lib/opentelemetry/jvm/javaagent.jar
+nodejs_auto_instrumentation_agent_path=/usr/lib/opentelemetry/nodejs/node_modules/@opentelemetry/auto-instrumentations-node/build/src/register.js
+
+include_paths=/app/*,/utilities/*,*.exe
+exclude_with_arguments=-javaagent:*,*@opentelemetry-js*,-Xmx?m
+include_with_arguments=*MyProject*.jar,*app.js
+```
+In the example above, both `include_paths` and `include_with_arguments` are configured, so a process
+must satisfy **both** to be instrumented. We'll instrument programs that:
+  - run from the `/app` or `/utilities` directories, or have an `.exe` extension (`include_paths`)
+  - **and** have a command line argument matching `*MyProject*.jar` or ending in `app.js` (`include_with_arguments`)
+  - however, even if both include conditions are met, the injector **will avoid** programs that have:
+    - a command line argument starting with `-javaagent:`
+    - a command line argument containing `@opentelemetry-js`
+    - a maximum memory argument matching `-Xmx?m` (single digit megabytes)
+
+The example above illustrates how we avoid telemetry from unwanted applications or
+injecting auto-instrumentation to programs that are already instrumented. If you have a
+standard way of deploying all of your applications, you can create a default `injector.conf`
+file that will ensure you get only the telemetry you want.
+
+Multiple lines of the same setting are combined as a union (OR). This means that if you define multiple
+lines of `include_paths`, for example, the resulting patterns list will be a union of all of the lines.
+This allows for easier manipulation of the configuration file with automated tools. Essentially, you can
+list each pattern on a separate line. Note that different settings (e.g. `include_paths` and
+`include_with_arguments`) are ANDed together — a process must satisfy each configured include setting.
+For example, the following two configuration files have an identical outcome:
+```
+include_paths=/app/*,/utilities/*,*.exe
+```
+is the same as:
+```
+include_paths=/app/*
+include_paths=/utilities/*
+include_paths=*.exe
+```
+
+### Disabling auto-instrumentation for all runtimes or specific runtimes
+
+To disable auto-instrumentation for all runtimes, set `auto_instrumentation_disabled=*` in the configuration file,
+or set `OTEL_INJECTOR_AUTO_INSTRUMENTATION_DISABLED=*` as an environment variable.
+To selectively disable auto-instrumentation for one or more specific runtimes, set `auto_instrumentation_disabled`
+or `OTEL_INJECTOR_AUTO_INSTRUMENTATION_DISABLED` to a comma-separated list of runtime names.
+Valid runtime names are:
+- `dotnet`
+- `jvm`
+- `nodejs`
+- `python`
+- `ruby`
+
+The injector will log a warning for unknown runtime names in the comma-separated list.
+
+For example, the following configuration file would leave JVM and Node.js auto-instrumentation active, while disabling
+.NET and Python auto-instrumentation:
+```
+jvm_auto_instrumentation_agent_path=/usr/lib/opentelemetry/jvm/javaagent.jar
+nodejs_auto_instrumentation_agent_path=/usr/lib/opentelemetry/nodejs/node_modules/@opentelemetry/auto-instrumentations-node/build/src/register.js
+auto_instrumentation_disabled=dotnet,python
+```
+
+You can also disable a specific runtime by setting its agent-path environment variable (or configuration-file key)
+to the empty string. For example, `RUBY_AUTO_INSTRUMENTATION_AGENT_PATH_PREFIX=` disables Ruby auto-instrumentation
+for a single process without touching the shared configuration. The same applies to `PYTHON_AUTO_INSTRUMENTATION_AGENT_PATH_PREFIX`,
+`DOTNET_AUTO_INSTRUMENTATION_AGENT_PATH_PREFIX`, `JVM_AUTO_INSTRUMENTATION_AGENT_PATH`, and `NODEJS_AUTO_INSTRUMENTATION_AGENT_PATH`.
+
+Note that the injector might still add additional resource attributes to applications, by adding or extending
+`OTEL_RESOURCE_ATTRIBUTES`, even when auto-instrumentation is disabled.
+See [Disabling the injector completely for specific workloads](#disabling-the-injector-completely-for-specific-workloads)
+for an option that also disables this part.
+
+### Disabling the injector completely for specific workloads
+
+The injector can be installed globally on the host in [`/etc/ld.so.preload`](https://man7.org/linux/man-pages/man8/ld.so.8.html#FILES)
+or for all workloads in a Kubernetes cluster/namespace. Therefore, we provide an option for you to disable the 
+injector for a specific program launch or workload by setting the environment variable `OTEL_INJECTOR_DISABLED=true`.
+When `OTEL_INJECTOR_DISABLED` is set to `true`, no environment variables will be modified by the injector.
+
+
+## Design
+
+This is a short summary of how the injector works internally:
+1. Find out which libc the process binds, if any. This is usually either glibc or musl.
+   (Some OpenTelemetry SDKs need to be injected differently, e.g. using different binaries depending on the libc
+   flavor.)
+2. If the process does not bind a libc, or it cannot be identified, the injector aborts injection and hands back control
+   to the host process.
+3. Find the location of the `dlsym` function in the loaded libc (in memory), reading ELF metadata.
+4. Use the libc's `dlsym` handle to look up more symbols in memory, in particular `getenv` and `setenv`.
+5. Again, if looking up any of the symbols fails, the injector aborts injection and hands back control to the host
+   process.
+6. Use the `getenv` function to read the current environment of the process (before adding or modifying any environment
+   variables).
+7. Use the `setenv` function to add or modify environment variables to add and activate OpenTelemetry
+   SDKs/auto-instrumentation agents for supported runtimes (e.g. `NODE_OPTIONS`, `JAVA_TOOL_OPTIONS`,
+   `CORECLR_PROFILER`).
+8. Use the pointer to the `setenv` symbol to add or modify `OTEL_RESOURCE_ATTRIBUTES`.
+
+There is a much more detailed explanation of this approach, and on alternative approaches and the intricate design
+constraints in [DESIGN.md](DESIGN.md).
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+### Maintainers
+
+- [Antoine Toulme](https://github.com/atoulme), [Splunk](https://www.splunk.com/)
+- [Bastian Krol](https://github.com/basti1302), [Dash0](https://www.dash0.com/)
+- [Jack Berg](https://github.com/jack-berg), [Grafana Labs](https://grafana.com/)
+- [Jacob Aronoff](https://github.com/jaronoff97), [Tero](https://www.usetero.com/)
+- [Michele Mancioppi](https://github.com/mmanciop), [Dash0](https://www.dash0.com/)
+- [Nikola Grcevski](https://github.com/grcevski), [Grafana Labs](https://grafana.com/)
+
+For more information about the maintainer role, see the [community repository](https://github.com/open-telemetry/community/blob/main/guides/contributor/membership.md#maintainer).
+
+### Project History
+
+The code project was initially donated by [Splunk](https://www.splunk.com/) and later replaced with another code donation
+by [Dash0](https://www.dash0.com/).

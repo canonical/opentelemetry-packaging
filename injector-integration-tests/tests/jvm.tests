@@ -1,0 +1,66 @@
+# Copyright The OpenTelemetry Authors
+# SPDX-License-Identifier: Apache-2.0
+
+run_test_case \
+  "adds the Java agent by adding a new JAVA_TOOL_OPTIONS environment variable" \
+  "app" \
+  "java -jar Main.jar verify-javaagent-has-been-injected" \
+  "otel.injector.jvm.no_op_agent.has_been_loaded: true"
+run_test_case \
+  "adds the Java agent to an existing JAVA_TOOL_OPTIONS environment variable" \
+  "app" \
+  "java -jar Main.jar verify-javaagent-has-been-injected-and-existing-property-is-still-in-place" \
+  "otel.injector.jvm.no_op_agent.has_been_loaded: true; some-property: some-value" \
+  "JAVA_TOOL_OPTIONS=-Dsome-property=some-value"
+
+# For test cases with the "default configuration file" substring in their label, run-tests-within-container.sh
+# will provide a configuration file in the expected location (/etc/opentelemetry/injector/injector.conf).
+run_test_case \
+  "uses the Java agent path from the default configuration file" \
+  "app" \
+  "java -jar Main.jar verify-javaagent-has-been-injected" \
+  "otel.injector.jvm.no_op_agent.has_been_loaded: true"
+run_test_case \
+  "the JVM_AUTO_INSTRUMENTATION_AGENT_PATH environment variable overrides the Java agent path from the default configuration file" \
+  "app" \
+  "java -jar Main.jar verify-javaagent-has-been-injected" \
+  "otel.injector.jvm.no_op_agent.has_been_loaded: true" \
+  "JVM_AUTO_INSTRUMENTATION_AGENT_PATH=/path/from/environment-variable/jvm/javaagent.jar"
+
+run_test_case \
+  "setting OTEL_INJECTOR_AUTO_INSTRUMENTATION_DISABLED=jvm disables the JVM auto-instrumentation" \
+  "app" \
+  "java -jar Main.jar verify-javaagent-has-been-injected" \
+  "otel.injector.jvm.no_op_agent.has_been_loaded: -" \
+  "OTEL_INJECTOR_AUTO_INSTRUMENTATION_DISABLED=jvm"
+run_test_case \
+  "setting OTEL_INJECTOR_AUTO_INSTRUMENTATION_DISABLED=* disables the JVM auto-instrumentation" \
+  "app" \
+  "java -jar Main.jar verify-javaagent-has-been-injected" \
+  "otel.injector.jvm.no_op_agent.has_been_loaded: -" \
+  "OTEL_INJECTOR_AUTO_INSTRUMENTATION_DISABLED=*"
+run_test_case \
+  "setting JVM_AUTO_INSTRUMENTATION_AGENT_PATH to the empty string disables the JVM auto-instrumentation" \
+  "app" \
+  "java -jar Main.jar verify-javaagent-has-been-injected" \
+  "otel.injector.jvm.no_op_agent.has_been_loaded: -" \
+  "JVM_AUTO_INSTRUMENTATION_AGENT_PATH="
+
+run_test_case \
+  "OTEL_ custom env var is returned according to the env file provided" \
+  "app" \
+  "java -jar Main.jar custom-env-var OTEL_SDK_DISABLED" \
+  "OTEL_SDK_DISABLED: true"
+
+run_test_case \
+  "non OTEL_ custom env var is ignored" \
+  "app" \
+  "java -jar Main.jar custom-env-var CUSTOM_ENV_VAR" \
+  "CUSTOM_ENV_VAR: -"
+
+run_test_case \
+  "setting OTEL_INJECTOR_DISABLED to true string disables the JVM auto-instrumentation" \
+  "app" \
+  "java -jar Main.jar verify-javaagent-has-been-injected" \
+  "otel.injector.jvm.no_op_agent.has_been_loaded: -" \
+  "OTEL_INJECTOR_DISABLED=true"

@@ -1,0 +1,7 @@
+.zig-cache
+zig-out
+
+so/
+dist/
+
+.tools/

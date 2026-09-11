@@ -1,0 +1,2491 @@
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
+
+const std = @import("std");
+const build_options = @import("build_options");
+
+const print = @import("print.zig");
+const test_util = @import("test_util.zig");
+const patterns_util = @import("patterns_util.zig");
+const proc_self_environ_parser = @import("proc_self_environ_parser.zig");
+
+const testing = std.testing;
+
+const default_config_file_path = "/etc/opentelemetry/injector/injector.conf";
+const config_file_path_env_var = "OTEL_INJECTOR_CONFIG_FILE";
+const max_line_length = 8192;
+const empty_string = @constCast("");
+const allowed_env_var_prefixes = build_options.allowed_env_var_prefixes;
+
+// Agent paths are empty by default; they are enabled by installing conf.d drop-in files from the
+// respective language packages (e.g., opentelemetry-java-autoinstrumentation installs java.conf).
+const default_all_auto_instrumentation_agents_env_path = "/etc/opentelemetry/injector/default_env.conf";
+const default_config_dir_path = "/etc/opentelemetry/injector/conf.d";
+const config_dir_path_env_var = "OTEL_INJECTOR_CONFIG_DIR";
+
+const dotnet_path_prefix_key = "dotnet_auto_instrumentation_agent_path_prefix";
+const dotnet_minimum_dotnet_major_version_key = "dotnet_auto_instrumentation_minimum_dotnet_major_version";
+const jvm_path_key = "jvm_auto_instrumentation_agent_path";
+const nodejs_path_key = "nodejs_auto_instrumentation_agent_path";
+const python_path_prefix_key = "python_auto_instrumentation_agent_path_prefix";
+const ruby_path_prefix_key = "ruby_auto_instrumentation_agent_path_prefix";
+
+const all_agents_env_path_key = "all_auto_instrumentation_agents_env_path";
+const auto_instrumentation_disabled_key = "auto_instrumentation_disabled";
+
+const dotnet_agent_path_prefix_env_var = "DOTNET_AUTO_INSTRUMENTATION_AGENT_PATH_PREFIX";
+const dotnet_minimum_dotnet_major_version_env_var = "DOTNET_AUTO_INSTRUMENTATION_MINIMUM_DOTNET_MAJOR_VERSION";
+const jvm_agent_path_env_var = "JVM_AUTO_INSTRUMENTATION_AGENT_PATH";
+const nodejs_agent_path_env_var = "NODEJS_AUTO_INSTRUMENTATION_AGENT_PATH";
+const python_agent_path_prefix_env_var = "PYTHON_AUTO_INSTRUMENTATION_AGENT_PATH_PREFIX";
+const ruby_agent_path_prefix_env_var = "RUBY_AUTO_INSTRUMENTATION_AGENT_PATH_PREFIX";
+
+/// Configuration options for choosing what to instrument or exclude from instrumentation
+const include_paths_key = "include_paths";
+const exclude_paths_key = "exclude_paths";
+
+const include_paths_env_var = "OTEL_INJECTOR_INCLUDE_PATHS";
+const exclude_paths_env_var = "OTEL_INJECTOR_EXCLUDE_PATHS";
+
+const include_args_key = "include_with_arguments";
+const exclude_args_key = "exclude_with_arguments";
+
+const include_args_env_var = "OTEL_INJECTOR_INCLUDE_WITH_ARGUMENTS";
+const exclude_args_env_var = "OTEL_INJECTOR_EXCLUDE_WITH_ARGUMENTS";
+
+/// Configuration option to disable parts of the injector
+const auto_instrumentation_disabled_env_var = "OTEL_INJECTOR_AUTO_INSTRUMENTATION_DISABLED";
+
+pub const InjectorConfiguration = struct {
+    dotnet_auto_instrumentation_agent_path_prefix: []u8,
+    jvm_auto_instrumentation_agent_path: []u8,
+    nodejs_auto_instrumentation_agent_path: []u8,
+    python_auto_instrumentation_agent_path_prefix: []u8,
+    ruby_auto_instrumentation_agent_path_prefix: []u8,
+    all_auto_instrumentation_agents_env_path: []u8,
+    all_auto_instrumentation_agents_env_vars: std.StringHashMap([]u8),
+    include_paths: [][]const u8,
+    exclude_paths: [][]const u8,
+    include_args: [][]const u8,
+    exclude_args: [][]const u8,
+    dotnet_auto_instrumentation_minimum_dotnet_major_version: u32,
+    dotnet_instrumentation_disabled: bool,
+    jvm_instrumentation_disabled: bool,
+    nodejs_instrumentation_disabled: bool,
+    python_instrumentation_disabled: bool,
+    ruby_instrumentation_disabled: bool,
+
+    pub fn deinit(self: *InjectorConfiguration, allocator: std.mem.Allocator) void {
+        allocator.free(self.dotnet_auto_instrumentation_agent_path_prefix);
+        allocator.free(self.jvm_auto_instrumentation_agent_path);
+        allocator.free(self.nodejs_auto_instrumentation_agent_path);
+        allocator.free(self.python_auto_instrumentation_agent_path_prefix);
+        allocator.free(self.ruby_auto_instrumentation_agent_path_prefix);
+        allocator.free(self.all_auto_instrumentation_agents_env_path);
+        var it = self.all_auto_instrumentation_agents_env_vars.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            allocator.free(entry.value_ptr.*);
+        }
+        self.all_auto_instrumentation_agents_env_vars.deinit();
+        deinitStringArray(allocator, self.include_paths);
+        deinitStringArray(allocator, self.exclude_paths);
+        deinitStringArray(allocator, self.include_args);
+        deinitStringArray(allocator, self.exclude_args);
+    }
+};
+
+const ConfigApplier = fn (gpa: std.mem.Allocator, key: []const u8, value: []u8, file_path: []const u8, configuration: *InjectorConfiguration) void;
+
+const default_dotnet_auto_instrumentation_agent_path_prefix = "";
+
+// The upstream OpenTelemetry .NET auto-instrumentation supports .NET 8 or later. Distributions of the .NET
+// auto-instrumentation that support older .NET versions can lower this threshold via the configuration file key
+// dotnet_auto_instrumentation_minimum_dotnet_major_version or the corresponding environment variable.
+pub const default_dotnet_auto_instrumentation_minimum_dotnet_major_version: u32 = 8;
+const default_jvm_auto_instrumentation_agent_path = "";
+const default_nodejs_auto_instrumentation_agent_path = "";
+
+// Python auto-instrumentation is opt-in for now, hence the default value for the Python path is the empty string --
+// an empty path effectively disables auto-instrumentation for the runtime in question.
+const default_python_auto_instrumentation_agent_path = "";
+
+// Ruby auto-instrumentation defaults to the empty string (disabled). It is enabled by installing the
+// conf.d drop-in file from the Ruby auto-instrumentation package (ruby.conf), which sets the path prefix.
+const default_ruby_auto_instrumentation_agent_path = "";
+
+var cached_configuration_optional: ?InjectorConfiguration = null;
+
+/// Checks whether the configuration has already been read and reads it if necessary. The configuration will only be
+/// read once per process and the result will be cached for subsequent calls.
+///
+/// The configuration will be read from the path denoted by the environment variable OTEL_INJECTOR_CONFIG_FILE, or from
+/// the default location /etc/opentelemetry/injector/injector.conf if this environment variable is unset or empty.
+/// If the file does not exist or cannot be opened, readConfiguration continues with default values.
+///
+/// After reading the configuration file, the configuration will be merged with values read from environment variables
+/// (DOTNET_AUTO_INSTRUMENTATION_AGENT_PATH_PREFIX, JVM_AUTO_INSTRUMENTATION_AGENT_PATH, etc.). Environment variables
+/// have higher precedence and can override settings from the configuration file.
+pub fn readConfiguration(allocator: std.mem.Allocator, getenv_fn: proc_self_environ_parser.GetenvFn) InjectorConfiguration {
+    if (cached_configuration_optional) |cached_configuration| {
+        return cached_configuration;
+    }
+
+    var config_file_path: []const u8 = default_config_file_path;
+    const env_config_path = getenv_fn(allocator, config_file_path_env_var);
+    defer if (env_config_path) |p| allocator.free(p);
+    if (env_config_path) |value| {
+        const trimmed = std.mem.trim(u8, value, " \t\r\n");
+        if (trimmed.len > 0) {
+            config_file_path = trimmed;
+        }
+    }
+
+    return readConfigurationFromPath(allocator, config_file_path, getenv_fn) catch |err| {
+        print.printError("Cannot allocate memory while parsing configuration: {t}", .{err});
+        return createEmptyConfiguration(allocator);
+    };
+}
+
+fn createEmptyConfiguration(allocator: std.mem.Allocator) InjectorConfiguration {
+    return InjectorConfiguration{
+        .dotnet_auto_instrumentation_agent_path_prefix = "",
+        .jvm_auto_instrumentation_agent_path = "",
+        .nodejs_auto_instrumentation_agent_path = "",
+        .python_auto_instrumentation_agent_path_prefix = "",
+        .ruby_auto_instrumentation_agent_path_prefix = "",
+        .all_auto_instrumentation_agents_env_path = "",
+        .all_auto_instrumentation_agents_env_vars = std.StringHashMap([]u8).init(allocator),
+        .include_paths = &.{},
+        .exclude_paths = &.{},
+        .include_args = &.{},
+        .exclude_args = &.{},
+        .dotnet_auto_instrumentation_minimum_dotnet_major_version = default_dotnet_auto_instrumentation_minimum_dotnet_major_version,
+        .dotnet_instrumentation_disabled = false,
+        .jvm_instrumentation_disabled = false,
+        .nodejs_instrumentation_disabled = false,
+        .python_instrumentation_disabled = false,
+        .ruby_instrumentation_disabled = false,
+    };
+}
+
+fn readConfigurationFromPath(allocator: std.mem.Allocator, cfg_file_path: []const u8, getenv_fn: proc_self_environ_parser.GetenvFn) std.mem.Allocator.Error!InjectorConfiguration {
+    // We create a good amount of intermediate values - keys, values, comma-separated parts of strings, default config
+    // values that might or might not be later overwritten, etc. It would tricky and error-prone to release each of
+    // them individually at exactly the right time. Instead, we use an arena for all allocations (including the actual
+    // config values). Once we have compiled the final configuration values, we copy them over to memory allocated via
+    // the allocator passed in via the allocator parameter, then we free all intermediate values in bulk by deinit-ing
+    // the arena.
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    var preliminary_configuration = try createDefaultConfiguration(arena_allocator);
+    readConfigurationFile(arena_allocator, cfg_file_path, &preliminary_configuration);
+    readConfigurationDirectory(arena_allocator, &preliminary_configuration);
+    readConfigurationFromEnvironment(arena_allocator, &preliminary_configuration, getenv_fn);
+    readAllAgentsEnvFile(
+        arena_allocator,
+        preliminary_configuration.all_auto_instrumentation_agents_env_path,
+        &preliminary_configuration,
+    );
+
+    const final_configuration =
+        try copyToPermanentlyAllocatedHeap(allocator, preliminary_configuration);
+    cached_configuration_optional = final_configuration;
+    return final_configuration;
+}
+
+test "readConfiguration: should cache configuration and return same instance on subsequent calls" {
+    const allocator = testing.allocator;
+    defer {
+        if (cached_configuration_optional) |*config| {
+            config.deinit(allocator);
+        }
+        cached_configuration_optional = null;
+    }
+
+    const original_environ = try test_util.clearStdCEnviron();
+    defer test_util.resetStdCEnviron(original_environ);
+
+    const config1 = readConfiguration(allocator, proc_self_environ_parser.posixGetenv);
+    const config2 = readConfiguration(allocator, proc_self_environ_parser.posixGetenv);
+
+    // Compare the pointer values directly to ensure the caching worked
+    try testing.expectEqual(@intFromPtr(config1.dotnet_auto_instrumentation_agent_path_prefix.ptr), @intFromPtr(config2.dotnet_auto_instrumentation_agent_path_prefix.ptr));
+    try testing.expectEqual(@intFromPtr(config1.jvm_auto_instrumentation_agent_path.ptr), @intFromPtr(config2.jvm_auto_instrumentation_agent_path.ptr));
+}
+
+test "readConfiguration: respects OTEL_INJECTOR_CONFIG_FILE environment variable" {
+    const allocator = testing.allocator;
+    defer {
+        if (cached_configuration_optional) |*config| {
+            config.deinit(allocator);
+        }
+        cached_configuration_optional = null;
+    }
+
+    const cwd_path = try std.fs.cwd().realpathAlloc(allocator, ".");
+    defer allocator.free(cwd_path);
+    const absolute_path_to_config_file =
+        try std.fs.path.resolve(allocator, &.{ cwd_path, "unit-test-assets/config/all_values.conf" });
+    defer allocator.free(absolute_path_to_config_file);
+
+    const env_string = try std.fmt.allocPrint(allocator, "{s}={s}", .{ config_file_path_env_var, absolute_path_to_config_file });
+    defer allocator.free(env_string);
+
+    const original_environ = try test_util.setStdCEnviron(&[1][]const u8{env_string});
+    defer test_util.resetStdCEnviron(original_environ);
+
+    const configuration = readConfiguration(allocator, proc_self_environ_parser.posixGetenv);
+    // No separate deinit — cleanup is handled by the defer block above via cached_configuration_optional
+
+    try testing.expectEqualStrings(
+        "/custom/path/to/dotnet/instrumentation",
+        configuration.dotnet_auto_instrumentation_agent_path_prefix,
+    );
+    try testing.expectEqualStrings(
+        "/custom/path/to/jvm/javaagent.jar",
+        configuration.jvm_auto_instrumentation_agent_path,
+    );
+}
+
+test "readConfigurationFromPath: loads from the specified path" {
+    const allocator = testing.allocator;
+
+    const cwd_path = try std.fs.cwd().realpathAlloc(allocator, ".");
+    defer allocator.free(cwd_path);
+    const absolute_path_to_config_file =
+        try std.fs.path.resolve(allocator, &.{ cwd_path, "unit-test-assets/config/all_values.conf" });
+    defer allocator.free(absolute_path_to_config_file);
+
+    const original_environ = try test_util.clearStdCEnviron();
+    defer test_util.resetStdCEnviron(original_environ);
+
+    var configuration = try readConfigurationFromPath(allocator, absolute_path_to_config_file, proc_self_environ_parser.posixGetenv);
+    defer configuration.deinit(allocator);
+
+    try testing.expectEqualStrings(
+        "/custom/path/to/dotnet/instrumentation",
+        configuration.dotnet_auto_instrumentation_agent_path_prefix,
+    );
+    try testing.expectEqual(@as(u32, 6), configuration.dotnet_auto_instrumentation_minimum_dotnet_major_version);
+    try testing.expectEqualStrings(
+        "/custom/path/to/jvm/javaagent.jar",
+        configuration.jvm_auto_instrumentation_agent_path,
+    );
+}
+
+test "readConfigurationFromPath: file does not exist, no environment variables" {
+    const allocator = testing.allocator;
+
+    const original_environ = try test_util.clearStdCEnviron();
+    defer test_util.resetStdCEnviron(original_environ);
+
+    var configuration = try readConfigurationFromPath(allocator, @constCast("/does/not/exist"), proc_self_environ_parser.posixGetenv);
+    defer configuration.deinit(allocator);
+
+    try testing.expectEqualStrings(
+        default_dotnet_auto_instrumentation_agent_path_prefix,
+        configuration.dotnet_auto_instrumentation_agent_path_prefix,
+    );
+    try testing.expectEqualStrings(
+        default_jvm_auto_instrumentation_agent_path,
+        configuration.jvm_auto_instrumentation_agent_path,
+    );
+    try testing.expectEqualStrings(
+        default_nodejs_auto_instrumentation_agent_path,
+        configuration.nodejs_auto_instrumentation_agent_path,
+    );
+    try testing.expectEqualStrings(
+        default_python_auto_instrumentation_agent_path,
+        configuration.python_auto_instrumentation_agent_path_prefix,
+    );
+    try testing.expectEqualStrings(
+        default_all_auto_instrumentation_agents_env_path,
+        configuration.all_auto_instrumentation_agents_env_path,
+    );
+    try testing.expectEqual(0, configuration.all_auto_instrumentation_agents_env_vars.count());
+    try testing.expectEqual(0, configuration.include_paths.len);
+    try testing.expectEqual(0, configuration.exclude_paths.len);
+    try testing.expectEqual(0, configuration.include_args.len);
+    try testing.expectEqual(0, configuration.exclude_args.len);
+    try testing.expectEqual(
+        default_dotnet_auto_instrumentation_minimum_dotnet_major_version,
+        configuration.dotnet_auto_instrumentation_minimum_dotnet_major_version,
+    );
+    try test_util.expectWithMessage(!configuration.dotnet_instrumentation_disabled, "!configuration.dotnet_instrumentation_disabled");
+    try test_util.expectWithMessage(!configuration.jvm_instrumentation_disabled, "!configuration.jvm_instrumentation_disabled");
+    try test_util.expectWithMessage(!configuration.nodejs_instrumentation_disabled, "!configuration.nodejs_instrumentation_disabled");
+    try test_util.expectWithMessage(!configuration.python_instrumentation_disabled, "!configuration.python_instrumentation_disabled");
+}
+
+test "readConfigurationFromPath: file does not exist, environment variables are set" {
+    const allocator = testing.allocator;
+
+    const original_environ = try test_util.setStdCEnviron(&[9][]const u8{
+        "DOTNET_AUTO_INSTRUMENTATION_AGENT_PATH_PREFIX=/path/from/env/var/dotnet",
+        "DOTNET_AUTO_INSTRUMENTATION_MINIMUM_DOTNET_MAJOR_VERSION=6",
+        "JVM_AUTO_INSTRUMENTATION_AGENT_PATH=/path/from/env/var/jvm",
+        "NODEJS_AUTO_INSTRUMENTATION_AGENT_PATH=/path/from/env/var/nodejs",
+        "PYTHON_AUTO_INSTRUMENTATION_AGENT_PATH_PREFIX=/path/from/env/var/python",
+        "OTEL_INJECTOR_INCLUDE_PATHS=/path/from/env/var/include1,/path/from/env/var/include2",
+        "OTEL_INJECTOR_EXCLUDE_PATHS=/path/from/env/var/exclude1,/path/from/env/var/exclude2",
+        "OTEL_INJECTOR_INCLUDE_WITH_ARGUMENTS=--from-env-var-include1,--from-env-var-include2",
+        "OTEL_INJECTOR_EXCLUDE_WITH_ARGUMENTS=--from-env-var-exclude1,--from-env-var-exclude2",
+    });
+    defer test_util.resetStdCEnviron(original_environ);
+
+    var configuration = try readConfigurationFromPath(allocator, @constCast("/does/not/exist"), proc_self_environ_parser.posixGetenv);
+    defer configuration.deinit(allocator);
+
+    try testing.expectEqualStrings(
+        "/path/from/env/var/dotnet",
+        configuration.dotnet_auto_instrumentation_agent_path_prefix,
+    );
+    try testing.expectEqual(@as(u32, 6), configuration.dotnet_auto_instrumentation_minimum_dotnet_major_version);
+    try testing.expectEqualStrings(
+        "/path/from/env/var/jvm",
+        configuration.jvm_auto_instrumentation_agent_path,
+    );
+    try testing.expectEqualStrings(
+        "/path/from/env/var/nodejs",
+        configuration.nodejs_auto_instrumentation_agent_path,
+    );
+    try testing.expectEqualStrings(
+        "/path/from/env/var/python",
+        configuration.python_auto_instrumentation_agent_path_prefix,
+    );
+    try testing.expectEqualStrings(
+        default_all_auto_instrumentation_agents_env_path,
+        configuration.all_auto_instrumentation_agents_env_path,
+    );
+    try testing.expectEqual(0, configuration.all_auto_instrumentation_agents_env_vars.count());
+    try testing.expectEqual(2, configuration.include_paths.len);
+    try testing.expectEqualStrings("/path/from/env/var/include1", configuration.include_paths[0]);
+    try testing.expectEqualStrings("/path/from/env/var/include2", configuration.include_paths[1]);
+    try testing.expectEqual(2, configuration.exclude_paths.len);
+    try testing.expectEqualStrings("/path/from/env/var/exclude1", configuration.exclude_paths[0]);
+    try testing.expectEqualStrings("/path/from/env/var/exclude2", configuration.exclude_paths[1]);
+    try testing.expectEqual(2, configuration.include_args.len);
+    try testing.expectEqualStrings("--from-env-var-include1", configuration.include_args[0]);
+    try testing.expectEqualStrings("--from-env-var-include2", configuration.include_args[1]);
+    try testing.expectEqual(2, configuration.exclude_args.len);
+    try testing.expectEqualStrings("--from-env-var-exclude1", configuration.exclude_args[0]);
+    try testing.expectEqualStrings("--from-env-var-exclude2", configuration.exclude_args[1]);
+    try test_util.expectWithMessage(!configuration.dotnet_instrumentation_disabled, "!configuration.dotnet_instrumentation_disabled");
+    try test_util.expectWithMessage(!configuration.jvm_instrumentation_disabled, "!configuration.jvm_instrumentation_disabled");
+    try test_util.expectWithMessage(!configuration.nodejs_instrumentation_disabled, "!configuration.nodejs_instrumentation_disabled");
+    try test_util.expectWithMessage(!configuration.python_instrumentation_disabled, "!configuration.python_instrumentation_disabled");
+}
+
+test "readConfigurationFromPath: all configuration values from file, no environment variables" {
+    const allocator = testing.allocator;
+    const cwd_path = try std.fs.cwd().realpathAlloc(allocator, ".");
+    defer allocator.free(cwd_path);
+    const absolute_path_to_config_file =
+        try std.fs.path.resolve(allocator, &.{ cwd_path, "unit-test-assets/config/all_values.conf" });
+    defer allocator.free(absolute_path_to_config_file);
+
+    const original_environ = try test_util.clearStdCEnviron();
+    defer test_util.resetStdCEnviron(original_environ);
+
+    var configuration = try readConfigurationFromPath(allocator, absolute_path_to_config_file, proc_self_environ_parser.posixGetenv);
+    defer configuration.deinit(allocator);
+
+    try testing.expectEqualStrings(
+        "/custom/path/to/dotnet/instrumentation",
+        configuration.dotnet_auto_instrumentation_agent_path_prefix,
+    );
+    try testing.expectEqual(@as(u32, 6), configuration.dotnet_auto_instrumentation_minimum_dotnet_major_version);
+    try testing.expectEqualStrings(
+        "/custom/path/to/jvm/javaagent.jar",
+        configuration.jvm_auto_instrumentation_agent_path,
+    );
+    try testing.expectEqualStrings(
+        "/custom/path/to/nodejs/node_modules/@opentelemetry/auto-instrumentations-node/build/src/register.js",
+        configuration.nodejs_auto_instrumentation_agent_path,
+    );
+    try testing.expectEqualStrings(
+        "/custom/path/to/python",
+        configuration.python_auto_instrumentation_agent_path_prefix,
+    );
+    try testing.expectEqualStrings(
+        "/custom/path/to/auto_instrumentation_env.conf",
+        configuration.all_auto_instrumentation_agents_env_path,
+    );
+    try testing.expectEqual(0, configuration.all_auto_instrumentation_agents_env_vars.count());
+    try testing.expectEqual(3, configuration.include_paths.len);
+    try testing.expectEqualStrings("/app/*", configuration.include_paths[0]);
+    try testing.expectEqualStrings("/home/user/test/*", configuration.include_paths[1]);
+    try testing.expectEqualStrings("/another_dir/*", configuration.include_paths[2]);
+    try testing.expectEqual(3, configuration.exclude_paths.len);
+    try testing.expectEqualStrings("/usr/*", configuration.exclude_paths[0]);
+    try testing.expectEqualStrings("/opt/*", configuration.exclude_paths[1]);
+    try testing.expectEqualStrings("/another_excluded_dir/*", configuration.exclude_paths[2]);
+    try testing.expectEqual(4, configuration.include_args.len);
+    try testing.expectEqualStrings("-jar", configuration.include_args[0]);
+    try testing.expectEqualStrings("*my-app*", configuration.include_args[1]);
+    try testing.expectEqualStrings("*.js", configuration.include_args[2]);
+    try testing.expectEqualStrings("*.dll", configuration.include_args[3]);
+    try testing.expectEqual(3, configuration.exclude_args.len);
+    try testing.expectEqualStrings("-javaagent*", configuration.exclude_args[0]);
+    try testing.expectEqualStrings("*@opentelemetry-js*", configuration.exclude_args[1]);
+    try testing.expectEqualStrings("-debug", configuration.exclude_args[2]);
+    try test_util.expectWithMessage(!configuration.dotnet_instrumentation_disabled, "!configuration.dotnet_instrumentation_disabled");
+    try test_util.expectWithMessage(!configuration.jvm_instrumentation_disabled, "!configuration.jvm_instrumentation_disabled");
+    try test_util.expectWithMessage(configuration.nodejs_instrumentation_disabled, "configuration.nodejs_instrumentation_disabled");
+    try test_util.expectWithMessage(!configuration.python_instrumentation_disabled, "!configuration.python_instrumentation_disabled");
+}
+
+test "readConfigurationFromPath: override some configuration values from file with environment variables" {
+    const allocator = testing.allocator;
+    const cwd_path = try std.fs.cwd().realpathAlloc(allocator, ".");
+    defer allocator.free(cwd_path);
+    const absolute_path_to_config_file =
+        try std.fs.path.resolve(allocator, &.{ cwd_path, "unit-test-assets/config/all_values.conf" });
+    defer allocator.free(absolute_path_to_config_file);
+
+    const original_environ = try test_util.setStdCEnviron(&[6][]const u8{
+        "DOTNET_AUTO_INSTRUMENTATION_AGENT_PATH_PREFIX=/path/from/env/var/dotnet",
+        "DOTNET_AUTO_INSTRUMENTATION_MINIMUM_DOTNET_MAJOR_VERSION=9",
+        "NODEJS_AUTO_INSTRUMENTATION_AGENT_PATH=/path/from/env/var/nodejs",
+        "OTEL_INJECTOR_AUTO_INSTRUMENTATION_DISABLED=python",
+        "OTEL_INJECTOR_INCLUDE_PATHS=/path/from/env/var/include1,/path/from/env/var/include2",
+        "OTEL_INJECTOR_EXCLUDE_WITH_ARGUMENTS=--from-env-var-exclude1,--from-env-var-exclude2",
+    });
+    defer test_util.resetStdCEnviron(original_environ);
+
+    var configuration = try readConfigurationFromPath(allocator, absolute_path_to_config_file, proc_self_environ_parser.posixGetenv);
+    defer configuration.deinit(allocator);
+
+    try testing.expectEqualStrings(
+        "/path/from/env/var/dotnet",
+        configuration.dotnet_auto_instrumentation_agent_path_prefix,
+    );
+    try testing.expectEqual(@as(u32, 9), configuration.dotnet_auto_instrumentation_minimum_dotnet_major_version);
+    try testing.expectEqualStrings(
+        "/custom/path/to/jvm/javaagent.jar",
+        configuration.jvm_auto_instrumentation_agent_path,
+    );
+    try testing.expectEqualStrings(
+        "/path/from/env/var/nodejs",
+        configuration.nodejs_auto_instrumentation_agent_path,
+    );
+    try testing.expectEqualStrings(
+        "/custom/path/to/python",
+        configuration.python_auto_instrumentation_agent_path_prefix,
+    );
+    try testing.expectEqualStrings(
+        "/custom/path/to/auto_instrumentation_env.conf",
+        configuration.all_auto_instrumentation_agents_env_path,
+    );
+    try testing.expectEqual(0, configuration.all_auto_instrumentation_agents_env_vars.count());
+    try testing.expectEqual(2, configuration.include_paths.len);
+    try testing.expectEqualStrings("/path/from/env/var/include1", configuration.include_paths[0]);
+    try testing.expectEqualStrings("/path/from/env/var/include2", configuration.include_paths[1]);
+    try testing.expectEqual(3, configuration.exclude_paths.len);
+    try testing.expectEqualStrings("/usr/*", configuration.exclude_paths[0]);
+    try testing.expectEqualStrings("/opt/*", configuration.exclude_paths[1]);
+    try testing.expectEqualStrings("/another_excluded_dir/*", configuration.exclude_paths[2]);
+    try testing.expectEqual(4, configuration.include_args.len);
+    try testing.expectEqualStrings("-jar", configuration.include_args[0]);
+    try testing.expectEqualStrings("*my-app*", configuration.include_args[1]);
+    try testing.expectEqualStrings("*.js", configuration.include_args[2]);
+    try testing.expectEqualStrings("*.dll", configuration.include_args[3]);
+    try testing.expectEqual(2, configuration.exclude_args.len);
+    try testing.expectEqualStrings("--from-env-var-exclude1", configuration.exclude_args[0]);
+    try testing.expectEqualStrings("--from-env-var-exclude2", configuration.exclude_args[1]);
+    try test_util.expectWithMessage(!configuration.dotnet_instrumentation_disabled, "!configuration.dotnet_instrumentation_disabled");
+    try test_util.expectWithMessage(!configuration.jvm_instrumentation_disabled, "!configuration.jvm_instrumentation_disabled");
+    try test_util.expectWithMessage(!configuration.nodejs_instrumentation_disabled, "!configuration.nodejs_instrumentation_disabled");
+    try test_util.expectWithMessage(configuration.python_instrumentation_disabled, "configuration.python_instrumentation_disabled");
+}
+
+fn createDefaultConfiguration(arena_allocator: std.mem.Allocator) std.mem.Allocator.Error!InjectorConfiguration {
+    return InjectorConfiguration{
+        .dotnet_auto_instrumentation_agent_path_prefix = try std.fmt.allocPrint(arena_allocator, "{s}", .{default_dotnet_auto_instrumentation_agent_path_prefix}),
+        .jvm_auto_instrumentation_agent_path = try std.fmt.allocPrint(arena_allocator, "{s}", .{default_jvm_auto_instrumentation_agent_path}),
+        .nodejs_auto_instrumentation_agent_path = try std.fmt.allocPrint(arena_allocator, "{s}", .{default_nodejs_auto_instrumentation_agent_path}),
+        .python_auto_instrumentation_agent_path_prefix = try std.fmt.allocPrint(arena_allocator, "{s}", .{default_python_auto_instrumentation_agent_path}),
+        .ruby_auto_instrumentation_agent_path_prefix = try std.fmt.allocPrint(arena_allocator, "{s}", .{default_ruby_auto_instrumentation_agent_path}),
+        .all_auto_instrumentation_agents_env_path = try std.fmt.allocPrint(arena_allocator, "{s}", .{default_all_auto_instrumentation_agents_env_path}),
+        .all_auto_instrumentation_agents_env_vars = std.StringHashMap([]u8).init(arena_allocator),
+        .include_paths = &.{},
+        .exclude_paths = &.{},
+        .include_args = &.{},
+        .exclude_args = &.{},
+        .dotnet_auto_instrumentation_minimum_dotnet_major_version = default_dotnet_auto_instrumentation_minimum_dotnet_major_version,
+        .dotnet_instrumentation_disabled = false,
+        .jvm_instrumentation_disabled = false,
+        .nodejs_instrumentation_disabled = false,
+        .python_instrumentation_disabled = false,
+        .ruby_instrumentation_disabled = false,
+    };
+}
+
+fn applyAutoInstrumentationDisabledValue(trimmed_value: []const u8, source: []const u8, configuration: *InjectorConfiguration) void {
+    if (std.mem.eql(u8, trimmed_value, "*")) {
+        configuration.dotnet_instrumentation_disabled = true;
+        configuration.jvm_instrumentation_disabled = true;
+        configuration.nodejs_instrumentation_disabled = true;
+        configuration.python_instrumentation_disabled = true;
+        configuration.ruby_instrumentation_disabled = true;
+    } else {
+        // In case the configuration file specifies auto_instrumentation_disabled and this is the second call of
+        // applyAutoInstrumentationDisabledValue for parsing OTEL_INJECTOR_AUTO_INSTRUMENTATION_DISABLED (if present),
+        // we need to reset all disabled flags to make sure the environment variable completely overrides what the
+        // config file said.
+        configuration.dotnet_instrumentation_disabled = false;
+        configuration.jvm_instrumentation_disabled = false;
+        configuration.nodejs_instrumentation_disabled = false;
+        configuration.python_instrumentation_disabled = false;
+        configuration.ruby_instrumentation_disabled = false;
+        var it = std.mem.splitScalar(u8, trimmed_value, ',');
+        while (it.next()) |part| {
+            const trimmed_part = std.mem.trim(u8, part, " \t");
+            if (std.mem.eql(u8, trimmed_part, "dotnet")) {
+                configuration.dotnet_instrumentation_disabled = true;
+            } else if (std.mem.eql(u8, trimmed_part, "jvm")) {
+                configuration.jvm_instrumentation_disabled = true;
+            } else if (std.mem.eql(u8, trimmed_part, "nodejs")) {
+                configuration.nodejs_instrumentation_disabled = true;
+            } else if (std.mem.eql(u8, trimmed_part, "python")) {
+                configuration.python_instrumentation_disabled = true;
+            } else if (std.mem.eql(u8, trimmed_part, "ruby")) {
+                configuration.ruby_instrumentation_disabled = true;
+            } else if (trimmed_part.len > 0) {
+                print.printWarn(
+                    "Unknown runtime in the list of disabled runtimes from {s}: \"{s}\" - this list item will be ignored.",
+                    .{ source, trimmed_part },
+                );
+            }
+        }
+    }
+}
+
+fn applyDotnetMinimumDotnetMajorVersionValue(value: []const u8, source: []const u8, configuration: *InjectorConfiguration) void {
+    const trimmed_value = std.mem.trim(u8, value, " \t");
+    const parsed_version = std.fmt.parseUnsigned(u32, trimmed_value, 10) catch {
+        print.printWarn(
+            "Ignoring invalid value for {s} from {s}: \"{s}\" - a non-negative integer is required.",
+            .{ dotnet_minimum_dotnet_major_version_key, source, trimmed_value },
+        );
+        return;
+    };
+    configuration.dotnet_auto_instrumentation_minimum_dotnet_major_version = parsed_version;
+}
+
+test "applyDotnetMinimumDotnetMajorVersionValue: parses a valid value" {
+    var configuration = createEmptyConfiguration(testing.allocator);
+    defer configuration.all_auto_instrumentation_agents_env_vars.deinit();
+
+    applyDotnetMinimumDotnetMajorVersionValue("6", "test", &configuration);
+
+    try testing.expectEqual(@as(u32, 6), configuration.dotnet_auto_instrumentation_minimum_dotnet_major_version);
+}
+
+test "applyDotnetMinimumDotnetMajorVersionValue: trims whitespace" {
+    var configuration = createEmptyConfiguration(testing.allocator);
+    defer configuration.all_auto_instrumentation_agents_env_vars.deinit();
+
+    applyDotnetMinimumDotnetMajorVersionValue(" 7\t", "test", &configuration);
+
+    try testing.expectEqual(@as(u32, 7), configuration.dotnet_auto_instrumentation_minimum_dotnet_major_version);
+}
+
+test "applyDotnetMinimumDotnetMajorVersionValue: ignores an invalid value and keeps the default" {
+    var configuration = createEmptyConfiguration(testing.allocator);
+    defer configuration.all_auto_instrumentation_agents_env_vars.deinit();
+
+    applyDotnetMinimumDotnetMajorVersionValue("not-a-number", "test", &configuration);
+
+    try testing.expectEqual(
+        default_dotnet_auto_instrumentation_minimum_dotnet_major_version,
+        configuration.dotnet_auto_instrumentation_minimum_dotnet_major_version,
+    );
+}
+
+fn applyCommaSeparatedPatternsOption(arena_allocator: std.mem.Allocator, setting: *[][]const u8, value: []u8, pattern_name: []const u8, cfg_file_path: []const u8) void {
+    const new_patterns = patterns_util.splitByComma(arena_allocator, value) catch |err| {
+        print.printError("error parsing {s} value from configuration file {s}: {}", .{ pattern_name, cfg_file_path, err });
+        return;
+    };
+    setting.* = std.mem.concat(arena_allocator, []const u8, &.{ setting.*, new_patterns }) catch |err| {
+        print.printError("error concatenating {s} from configuration file {s}: {}", .{ pattern_name, cfg_file_path, err });
+        return;
+    };
+}
+
+fn applyKeyValueToGeneralOptions(arena_allocator: std.mem.Allocator, key: []const u8, value: []u8, _cfg_file_path: []const u8, _configuration: *InjectorConfiguration) void {
+    if (std.mem.eql(u8, key, dotnet_path_prefix_key)) {
+        _configuration.dotnet_auto_instrumentation_agent_path_prefix = value;
+    } else if (std.mem.eql(u8, key, dotnet_minimum_dotnet_major_version_key)) {
+        applyDotnetMinimumDotnetMajorVersionValue(value, _cfg_file_path, _configuration);
+    } else if (std.mem.eql(u8, key, jvm_path_key)) {
+        _configuration.jvm_auto_instrumentation_agent_path = value;
+    } else if (std.mem.eql(u8, key, nodejs_path_key)) {
+        _configuration.nodejs_auto_instrumentation_agent_path = value;
+    } else if (std.mem.eql(u8, key, python_path_prefix_key)) {
+        _configuration.python_auto_instrumentation_agent_path_prefix = value;
+    } else if (std.mem.eql(u8, key, ruby_path_prefix_key)) {
+        _configuration.ruby_auto_instrumentation_agent_path_prefix = value;
+    } else if (std.mem.eql(u8, key, all_agents_env_path_key)) {
+        _configuration.all_auto_instrumentation_agents_env_path = value;
+    } else if (std.mem.eql(u8, key, include_paths_key)) {
+        applyCommaSeparatedPatternsOption(arena_allocator, &_configuration.include_paths, value, "include_paths", _cfg_file_path);
+    } else if (std.mem.eql(u8, key, exclude_paths_key)) {
+        applyCommaSeparatedPatternsOption(arena_allocator, &_configuration.exclude_paths, value, "exclude_paths", _cfg_file_path);
+    } else if (std.mem.eql(u8, key, include_args_key)) {
+        applyCommaSeparatedPatternsOption(arena_allocator, &_configuration.include_args, value, "include_arguments", _cfg_file_path);
+    } else if (std.mem.eql(u8, key, exclude_args_key)) {
+        applyCommaSeparatedPatternsOption(arena_allocator, &_configuration.exclude_args, value, "exclude_arguments", _cfg_file_path);
+    } else if (std.mem.eql(u8, key, auto_instrumentation_disabled_key)) {
+        applyAutoInstrumentationDisabledValue(value, _cfg_file_path, _configuration);
+    } else {
+        print.printError("ignoring unknown configuration key in {s}: {s}={s}", .{ _cfg_file_path, key, value });
+    }
+}
+
+fn readConfigurationFile(arena_allocator: std.mem.Allocator, cfg_file_path: []const u8, configuration: *InjectorConfiguration) void {
+    print.printDebug("reading configuration file from {s}.", .{cfg_file_path});
+    const config_file = std.fs.cwd().openFile(cfg_file_path, .{}) catch |err| {
+        print.printDebug(
+            "The configuration file {s} does not exist or cannot be opened. Configuration will use default values and environment variables only. Error: {t}",
+            .{ cfg_file_path, err },
+        );
+        return;
+    };
+    defer config_file.close();
+
+    parseConfiguration(
+        arena_allocator,
+        configuration,
+        config_file,
+        cfg_file_path,
+        applyKeyValueToGeneralOptions,
+    );
+    print.printDebug("successfully read configuration file from {s}.", .{cfg_file_path});
+}
+
+/// Reads configuration drop-in files from the conf.d directory. Each installed language package
+/// (e.g., opentelemetry-java-autoinstrumentation) places its configuration in this directory.
+/// Files are read in alphabetical order; later files can override earlier ones.
+fn readConfigurationDirectory(arena_allocator: std.mem.Allocator, configuration: *InjectorConfiguration) void {
+    var config_dir_path: []const u8 = default_config_dir_path;
+    if (std.posix.getenv(config_dir_path_env_var)) |value| {
+        config_dir_path = std.mem.trim(u8, value, " \t\r\n");
+        if (config_dir_path.len == 0) {
+            config_dir_path = default_config_dir_path;
+        }
+    }
+
+    print.printDebug("reading configuration drop-in files from {s}.", .{config_dir_path});
+
+    var dir = std.fs.cwd().openDir(config_dir_path, .{ .iterate = true }) catch |err| {
+        print.printDebug(
+            "The configuration directory {s} does not exist or cannot be opened. Error: {t}",
+            .{ config_dir_path, err },
+        );
+        return;
+    };
+    defer dir.close();
+
+    // Collect and sort file names to ensure deterministic ordering
+    var file_names: std.ArrayList([]const u8) = std.ArrayList([]const u8).initCapacity(arena_allocator, 16) catch {
+        print.printDebug("Failed to allocate memory for conf.d file list", .{});
+        return;
+    };
+    var dir_iter = dir.iterate();
+    while (dir_iter.next() catch null) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".conf")) continue;
+        const name_copy = std.fmt.allocPrint(arena_allocator, "{s}", .{entry.name}) catch continue;
+        file_names.append(arena_allocator, name_copy) catch continue;
+    }
+
+    // Sort alphabetically
+    std.mem.sort([]const u8, file_names.items, {}, struct {
+        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.lessThan);
+
+    // Read each file
+    for (file_names.items) |file_name| {
+        const full_path = std.fmt.allocPrint(arena_allocator, "{s}/{s}", .{ config_dir_path, file_name }) catch continue;
+        print.printDebug("reading configuration drop-in file: {s}", .{full_path});
+        readConfigurationFile(arena_allocator, full_path, configuration);
+    }
+}
+
+fn applyKeyValueToAllAgentsEnv(_: std.mem.Allocator, key: []const u8, value: []u8, _file_path: []const u8, _configuration: *InjectorConfiguration) void {
+    if (!isAllowedEnvVarKey(key)) {
+        print.printWarn(
+            "environment variable {s} does not match any allowed prefix from this build ({s}). ignoring.",
+            .{ key, allowed_env_var_prefixes },
+        );
+        return;
+    }
+    _configuration.all_auto_instrumentation_agents_env_vars.put(key, value) catch |e| {
+        print.printError("error storing environment variable {s} from file {s}: {}", .{ key, _file_path, e });
+    };
+}
+
+fn isAllowedEnvVarKey(key: []const u8) bool {
+    return hasAllowedPrefix(key, allowed_env_var_prefixes);
+}
+
+fn hasAllowedPrefix(key: []const u8, prefixes_csv: []const u8) bool {
+    var prefixes = std.mem.splitScalar(u8, prefixes_csv, ',');
+    while (prefixes.next()) |raw_prefix| {
+        const prefix = std.mem.trim(u8, raw_prefix, " \t\r\n");
+        if (prefix.len == 0) {
+            continue;
+        }
+        if (std.mem.startsWith(u8, key, prefix)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn readAllAgentsEnvFile(arena_allocator: std.mem.Allocator, env_file_path: []const u8, configuration: *InjectorConfiguration) void {
+    if (env_file_path.len == 0) {
+        return;
+    }
+
+    const env_file = std.fs.cwd().openFile(env_file_path, .{}) catch |err| {
+        print.printDebug("The configuration file {s} does not exist or cannot be opened. Error: {}", .{ env_file_path, err });
+        return;
+    };
+    defer env_file.close();
+
+    parseConfiguration(
+        arena_allocator,
+        configuration,
+        env_file,
+        env_file_path,
+        applyKeyValueToAllAgentsEnv,
+    );
+}
+
+fn parseConfiguration(
+    arena_allocator: std.mem.Allocator,
+    configuration: *InjectorConfiguration,
+    config_file: std.fs.File,
+    cfg_file_path: []const u8,
+    comptime applyKeyValueToConfig: ConfigApplier,
+) void {
+    var buf: [max_line_length]u8 = undefined;
+    var reader = config_file.reader(&buf);
+    while (takeSentinelOrDiscardOverlyLongLine(&reader, cfg_file_path)) |line| {
+        if (parseLine(arena_allocator, line, cfg_file_path)) |kv| {
+            applyKeyValueToConfig(arena_allocator, kv.key, kv.value, cfg_file_path, configuration);
+        }
+    } else |err| switch (err) {
+        error.ReadFailed => {
+            print.printError("Failed to read configuration file {s}", .{cfg_file_path});
+            return;
+        },
+        // if the file does not end with a newline, we still need to parse the last line
+        error.EndOfStream => {
+            var buffer: [max_line_length]u8 = undefined;
+            const chars = reader.interface.readSliceShort(&buffer) catch 0;
+            if (parseLine(arena_allocator, buffer[0..chars], cfg_file_path)) |kv| {
+                applyKeyValueToConfig(arena_allocator, kv.key, kv.value, cfg_file_path, configuration);
+            }
+        },
+    }
+}
+
+fn copyToPermanentlyAllocatedHeap(
+    allocator: std.mem.Allocator,
+    preliminary_configuration: InjectorConfiguration,
+) std.mem.Allocator.Error!InjectorConfiguration {
+    return InjectorConfiguration{
+        .dotnet_auto_instrumentation_agent_path_prefix = try std.fmt.allocPrint(
+            allocator,
+            "{s}",
+            .{preliminary_configuration.dotnet_auto_instrumentation_agent_path_prefix},
+        ),
+        .jvm_auto_instrumentation_agent_path = try std.fmt.allocPrint(
+            allocator,
+            "{s}",
+            .{preliminary_configuration.jvm_auto_instrumentation_agent_path},
+        ),
+        .nodejs_auto_instrumentation_agent_path = try std.fmt.allocPrint(
+            allocator,
+            "{s}",
+            .{preliminary_configuration.nodejs_auto_instrumentation_agent_path},
+        ),
+        .python_auto_instrumentation_agent_path_prefix = try std.fmt.allocPrint(
+            allocator,
+            "{s}",
+            .{preliminary_configuration.python_auto_instrumentation_agent_path_prefix},
+        ),
+        .ruby_auto_instrumentation_agent_path_prefix = try std.fmt.allocPrint(
+            allocator,
+            "{s}",
+            .{preliminary_configuration.ruby_auto_instrumentation_agent_path_prefix},
+        ),
+        .all_auto_instrumentation_agents_env_path = try std.fmt.allocPrint(
+            allocator,
+            "{s}",
+            .{preliminary_configuration.all_auto_instrumentation_agents_env_path},
+        ),
+        .all_auto_instrumentation_agents_env_vars = try copyMap(
+            allocator,
+            preliminary_configuration.all_auto_instrumentation_agents_env_vars,
+        ),
+        .include_paths = try copyStringArray(allocator, preliminary_configuration.include_paths),
+        .exclude_paths = try copyStringArray(allocator, preliminary_configuration.exclude_paths),
+        .include_args = try copyStringArray(allocator, preliminary_configuration.include_args),
+        .exclude_args = try copyStringArray(allocator, preliminary_configuration.exclude_args),
+        .dotnet_auto_instrumentation_minimum_dotnet_major_version = preliminary_configuration.dotnet_auto_instrumentation_minimum_dotnet_major_version,
+        .dotnet_instrumentation_disabled = preliminary_configuration.dotnet_instrumentation_disabled,
+        .jvm_instrumentation_disabled = preliminary_configuration.jvm_instrumentation_disabled,
+        .nodejs_instrumentation_disabled = preliminary_configuration.nodejs_instrumentation_disabled,
+        .python_instrumentation_disabled = preliminary_configuration.python_instrumentation_disabled,
+        .ruby_instrumentation_disabled = preliminary_configuration.ruby_instrumentation_disabled,
+    };
+}
+
+fn takeSentinelOrDiscardOverlyLongLine(reader: *std.fs.File.Reader, cfg_file_path: []const u8) ![]u8 {
+    if (reader.interface.takeSentinel('\n')) |slice| {
+        return slice;
+    } else |err| switch (err) {
+        error.StreamTooLong => {
+            print.printError(
+                "A line in configuration file {s} exceeds the maximum allowed length of {d} characters and will be ignored.",
+                .{ cfg_file_path, max_line_length },
+            );
+            // Ignore lines that are too long for the buffer; advance the the read positon to the next delimiter to
+            // avoid stream corruption.
+            _ = try reader.interface.discardDelimiterInclusive('\n');
+            return empty_string;
+        },
+        else => |leftover_err| return leftover_err,
+    }
+}
+
+test "readConfigurationFile: file does not exist" {
+    const allocator = testing.allocator;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    var configuration = try createDefaultConfiguration(arena_allocator);
+    readConfigurationFile(arena_allocator, "/does/not/exist", &configuration);
+
+    try testing.expectEqualStrings(
+        default_dotnet_auto_instrumentation_agent_path_prefix,
+        configuration.dotnet_auto_instrumentation_agent_path_prefix,
+    );
+    try testing.expectEqualStrings(
+        default_jvm_auto_instrumentation_agent_path,
+        configuration.jvm_auto_instrumentation_agent_path,
+    );
+    try testing.expectEqualStrings(
+        default_nodejs_auto_instrumentation_agent_path,
+        configuration.nodejs_auto_instrumentation_agent_path,
+    );
+    try testing.expectEqualStrings(
+        default_python_auto_instrumentation_agent_path,
+        configuration.python_auto_instrumentation_agent_path_prefix,
+    );
+    try testing.expectEqualStrings(
+        default_all_auto_instrumentation_agents_env_path,
+        configuration.all_auto_instrumentation_agents_env_path,
+    );
+    try testing.expectEqual(0, configuration.all_auto_instrumentation_agents_env_vars.count());
+    try testing.expectEqual(0, configuration.include_paths.len);
+    try testing.expectEqual(0, configuration.exclude_paths.len);
+    try testing.expectEqual(0, configuration.include_args.len);
+    try testing.expectEqual(0, configuration.exclude_args.len);
+    try test_util.expectWithMessage(!configuration.dotnet_instrumentation_disabled, "!configuration.dotnet_instrumentation_disabled");
+    try test_util.expectWithMessage(!configuration.jvm_instrumentation_disabled, "!configuration.jvm_instrumentation_disabled");
+    try test_util.expectWithMessage(!configuration.nodejs_instrumentation_disabled, "!configuration.nodejs_instrumentation_disabled");
+    try test_util.expectWithMessage(!configuration.python_instrumentation_disabled, "!configuration.python_instrumentation_disabled");
+}
+
+test "readConfigurationFile: empty file" {
+    const allocator = testing.allocator;
+    const cwd_path = try std.fs.cwd().realpathAlloc(allocator, ".");
+    defer allocator.free(cwd_path);
+    const absolute_path_to_config_file = try std.fs.path.resolve(allocator, &.{ cwd_path, "unit-test-assets/config/empty.conf" });
+    defer allocator.free(absolute_path_to_config_file);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    var configuration = try createDefaultConfiguration(arena_allocator);
+    readConfigurationFile(arena_allocator, absolute_path_to_config_file, &configuration);
+
+    try testing.expectEqualStrings(
+        default_dotnet_auto_instrumentation_agent_path_prefix,
+        configuration.dotnet_auto_instrumentation_agent_path_prefix,
+    );
+    try testing.expectEqualStrings(
+        default_jvm_auto_instrumentation_agent_path,
+        configuration.jvm_auto_instrumentation_agent_path,
+    );
+    try testing.expectEqualStrings(
+        default_nodejs_auto_instrumentation_agent_path,
+        configuration.nodejs_auto_instrumentation_agent_path,
+    );
+    try testing.expectEqualStrings(
+        default_python_auto_instrumentation_agent_path,
+        configuration.python_auto_instrumentation_agent_path_prefix,
+    );
+    try testing.expectEqualStrings(
+        default_all_auto_instrumentation_agents_env_path,
+        configuration.all_auto_instrumentation_agents_env_path,
+    );
+    try testing.expectEqual(0, configuration.all_auto_instrumentation_agents_env_vars.count());
+    try testing.expectEqual(0, configuration.include_paths.len);
+    try testing.expectEqual(0, configuration.exclude_paths.len);
+    try testing.expectEqual(0, configuration.include_args.len);
+    try testing.expectEqual(0, configuration.exclude_args.len);
+    try test_util.expectWithMessage(!configuration.dotnet_instrumentation_disabled, "!configuration.dotnet_instrumentation_disabled");
+    try test_util.expectWithMessage(!configuration.jvm_instrumentation_disabled, "!configuration.jvm_instrumentation_disabled");
+    try test_util.expectWithMessage(!configuration.nodejs_instrumentation_disabled, "!configuration.nodejs_instrumentation_disabled");
+    try test_util.expectWithMessage(!configuration.python_instrumentation_disabled, "!configuration.python_instrumentation_disabled");
+}
+
+test "readConfigurationFile: all configuration values" {
+    const allocator = testing.allocator;
+    const cwd_path = try std.fs.cwd().realpathAlloc(allocator, ".");
+    defer allocator.free(cwd_path);
+    const absolute_path_to_config_file = try std.fs.path.resolve(allocator, &.{ cwd_path, "unit-test-assets/config/all_values.conf" });
+    defer allocator.free(absolute_path_to_config_file);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    var configuration = try createDefaultConfiguration(arena_allocator);
+    readConfigurationFile(arena_allocator, absolute_path_to_config_file, &configuration);
+
+    try testing.expectEqualStrings(
+        "/custom/path/to/dotnet/instrumentation",
+        configuration.dotnet_auto_instrumentation_agent_path_prefix,
+    );
+    try testing.expectEqualStrings(
+        "/custom/path/to/jvm/javaagent.jar",
+        configuration.jvm_auto_instrumentation_agent_path,
+    );
+    try testing.expectEqualStrings(
+        "/custom/path/to/nodejs/node_modules/@opentelemetry/auto-instrumentations-node/build/src/register.js",
+        configuration.nodejs_auto_instrumentation_agent_path,
+    );
+    try testing.expectEqualStrings(
+        "/custom/path/to/python",
+        configuration.python_auto_instrumentation_agent_path_prefix,
+    );
+    try testing.expectEqualStrings(
+        "/custom/path/to/ruby",
+        configuration.ruby_auto_instrumentation_agent_path_prefix,
+    );
+    try testing.expectEqualStrings(
+        "/custom/path/to/auto_instrumentation_env.conf",
+        configuration.all_auto_instrumentation_agents_env_path,
+    );
+    try testing.expectEqual(0, configuration.all_auto_instrumentation_agents_env_vars.count());
+    try testing.expectEqual(3, configuration.include_paths.len);
+    try testing.expectEqualStrings("/app/*", configuration.include_paths[0]);
+    try testing.expectEqualStrings("/home/user/test/*", configuration.include_paths[1]);
+    try testing.expectEqualStrings("/another_dir/*", configuration.include_paths[2]);
+    try testing.expectEqual(3, configuration.exclude_paths.len);
+    try testing.expectEqualStrings("/usr/*", configuration.exclude_paths[0]);
+    try testing.expectEqualStrings("/opt/*", configuration.exclude_paths[1]);
+    try testing.expectEqualStrings("/another_excluded_dir/*", configuration.exclude_paths[2]);
+    try testing.expectEqual(4, configuration.include_args.len);
+    try testing.expectEqualStrings("-jar", configuration.include_args[0]);
+    try testing.expectEqualStrings("*my-app*", configuration.include_args[1]);
+    try testing.expectEqualStrings("*.js", configuration.include_args[2]);
+    try testing.expectEqualStrings("*.dll", configuration.include_args[3]);
+    try testing.expectEqual(3, configuration.exclude_args.len);
+    try testing.expectEqualStrings("-javaagent*", configuration.exclude_args[0]);
+    try testing.expectEqualStrings("*@opentelemetry-js*", configuration.exclude_args[1]);
+    try testing.expectEqualStrings("-debug", configuration.exclude_args[2]);
+    try test_util.expectWithMessage(!configuration.dotnet_instrumentation_disabled, "!configuration.dotnet_instrumentation_disabled");
+    try test_util.expectWithMessage(!configuration.jvm_instrumentation_disabled, "!configuration.jvm_instrumentation_disabled");
+    try test_util.expectWithMessage(configuration.nodejs_instrumentation_disabled, "configuration.nodejs_instrumentation_disabled");
+    try test_util.expectWithMessage(!configuration.python_instrumentation_disabled, "!configuration.python_instrumentation_disabled");
+}
+
+test "readConfigurationFile: all configuration values plus whitespace and comments" {
+    const allocator = testing.allocator;
+    const cwd_path = try std.fs.cwd().realpathAlloc(allocator, ".");
+    defer allocator.free(cwd_path);
+    const absolute_path_to_config_file = try std.fs.path.resolve(allocator, &.{ cwd_path, "unit-test-assets/config/with_comments_and_whitespace.conf" });
+    defer allocator.free(absolute_path_to_config_file);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    var configuration = try createDefaultConfiguration(arena_allocator);
+    readConfigurationFile(arena_allocator, absolute_path_to_config_file, &configuration);
+
+    try testing.expectEqualStrings(
+        "/custom/path/to/dotnet/instrumentation",
+        configuration.dotnet_auto_instrumentation_agent_path_prefix,
+    );
+    try testing.expectEqualStrings(
+        "/custom/path/to/jvm/javaagent.jar",
+        configuration.jvm_auto_instrumentation_agent_path,
+    );
+    try testing.expectEqualStrings(
+        "/custom/path/to/nodejs/node_modules/@opentelemetry/auto-instrumentations-node/build/src/register.js",
+        configuration.nodejs_auto_instrumentation_agent_path,
+    );
+    try testing.expectEqualStrings(
+        default_python_auto_instrumentation_agent_path,
+        configuration.python_auto_instrumentation_agent_path_prefix,
+    );
+    try testing.expectEqualStrings(
+        "/custom/path/to/auto_instrumentation_env.conf",
+        configuration.all_auto_instrumentation_agents_env_path,
+    );
+    try test_util.expectWithMessage(!configuration.dotnet_instrumentation_disabled, "!configuration.dotnet_instrumentation_disabled");
+    try test_util.expectWithMessage(configuration.jvm_instrumentation_disabled, "configuration.jvm_instrumentation_disabled");
+    try test_util.expectWithMessage(!configuration.nodejs_instrumentation_disabled, "!configuration.nodejs_instrumentation_disabled");
+    try test_util.expectWithMessage(!configuration.python_instrumentation_disabled, "!configuration.python_instrumentation_disabled");
+}
+
+test "readConfigurationFile: does not parse overly long lines" {
+    const allocator = testing.allocator;
+    const cwd_path = try std.fs.cwd().realpathAlloc(allocator, ".");
+    defer allocator.free(cwd_path);
+    const absolute_path_to_config_file = try std.fs.path.resolve(allocator, &.{ cwd_path, "unit-test-assets/config/very_long_lines.conf" });
+    defer allocator.free(absolute_path_to_config_file);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    var configuration = try createDefaultConfiguration(arena_allocator);
+    readConfigurationFile(arena_allocator, absolute_path_to_config_file, &configuration);
+
+    try testing.expectEqualStrings(
+        default_dotnet_auto_instrumentation_agent_path_prefix,
+        configuration.dotnet_auto_instrumentation_agent_path_prefix,
+    );
+    try testing.expectEqualStrings(
+        "/this/line/should/be/parsed",
+        configuration.jvm_auto_instrumentation_agent_path,
+    );
+    try testing.expectEqualStrings(
+        default_nodejs_auto_instrumentation_agent_path,
+        configuration.nodejs_auto_instrumentation_agent_path,
+    );
+    try test_util.expectWithMessage(!configuration.dotnet_instrumentation_disabled, "!configuration.dotnet_instrumentation_disabled");
+    try test_util.expectWithMessage(!configuration.jvm_instrumentation_disabled, "!configuration.jvm_instrumentation_disabled");
+    try test_util.expectWithMessage(!configuration.nodejs_instrumentation_disabled, "!configuration.nodejs_instrumentation_disabled");
+    try test_util.expectWithMessage(!configuration.python_instrumentation_disabled, "!configuration.python_instrumentation_disabled");
+}
+
+test "readConfigurationFile: auto_instrumentation_disabled=* disables all runtimes" {
+    const allocator = testing.allocator;
+    const cwd_path = try std.fs.cwd().realpathAlloc(allocator, ".");
+    defer allocator.free(cwd_path);
+    const absolute_path_to_config_file = try std.fs.path.resolve(allocator, &.{ cwd_path, "unit-test-assets/config/auto_instrumentation_disabled_star.conf" });
+    defer allocator.free(absolute_path_to_config_file);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    var configuration = try createDefaultConfiguration(arena_allocator);
+    readConfigurationFile(arena_allocator, absolute_path_to_config_file, &configuration);
+
+    try test_util.expectWithMessage(configuration.dotnet_instrumentation_disabled, "configuration.dotnet_instrumentation_disabled");
+    try test_util.expectWithMessage(configuration.jvm_instrumentation_disabled, "configuration.jvm_instrumentation_disabled");
+    try test_util.expectWithMessage(configuration.nodejs_instrumentation_disabled, "configuration.nodejs_instrumentation_disabled");
+    try test_util.expectWithMessage(configuration.python_instrumentation_disabled, "configuration.python_instrumentation_disabled");
+}
+
+test "readConfigurationFile: auto_instrumentation_disabled with comma-separated list" {
+    const allocator = testing.allocator;
+    const cwd_path = try std.fs.cwd().realpathAlloc(allocator, ".");
+    defer allocator.free(cwd_path);
+    const absolute_path_to_config_file = try std.fs.path.resolve(allocator, &.{ cwd_path, "unit-test-assets/config/auto_instrumentation_disabled_list.conf" });
+    defer allocator.free(absolute_path_to_config_file);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    var configuration = try createDefaultConfiguration(arena_allocator);
+    readConfigurationFile(arena_allocator, absolute_path_to_config_file, &configuration);
+
+    try test_util.expectWithMessage(configuration.dotnet_instrumentation_disabled, "configuration.dotnet_instrumentation_disabled");
+    try test_util.expectWithMessage(configuration.jvm_instrumentation_disabled, "configuration.jvm_instrumentation_disabled");
+    try test_util.expectWithMessage(configuration.nodejs_instrumentation_disabled, "configuration.nodejs_instrumentation_disabled");
+    try test_util.expectWithMessage(configuration.python_instrumentation_disabled, "configuration.python_instrumentation_disabled");
+}
+
+test "readConfigurationFile: multiple auto_instrumentation_disabled line: last one wins" {
+    const allocator = testing.allocator;
+    const cwd_path = try std.fs.cwd().realpathAlloc(allocator, ".");
+    defer allocator.free(cwd_path);
+    const absolute_path_to_config_file = try std.fs.path.resolve(allocator, &.{ cwd_path, "unit-test-assets/config/auto_instrumentation_disabled_multiple_times.conf" });
+    defer allocator.free(absolute_path_to_config_file);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    var configuration = try createDefaultConfiguration(arena_allocator);
+    readConfigurationFile(arena_allocator, absolute_path_to_config_file, &configuration);
+
+    try test_util.expectWithMessage(!configuration.dotnet_instrumentation_disabled, "!configuration.dotnet_instrumentation_disabled");
+    try test_util.expectWithMessage(configuration.jvm_instrumentation_disabled, "configuration.jvm_instrumentation_disabled");
+    try test_util.expectWithMessage(!configuration.nodejs_instrumentation_disabled, "!configuration.nodejs_instrumentation_disabled");
+    try test_util.expectWithMessage(!configuration.python_instrumentation_disabled, "!configuration.python_instrumentation_disabled");
+}
+
+test "hasAllowedPrefix: default OTEL_ prefix only" {
+    try test_util.expectWithMessage(
+        hasAllowedPrefix("OTEL_SDK_DISABLED", "OTEL_"),
+        "OTEL_SDK_DISABLED should match OTEL_",
+    );
+    try test_util.expectWithMessage(
+        !hasAllowedPrefix("CUSTOM_PREFIX_ACCESS_TOKEN", "OTEL_"),
+        "CUSTOM_PREFIX_ACCESS_TOKEN should not match OTEL_",
+    );
+}
+
+test "hasAllowedPrefix: supports multiple prefixes and whitespace" {
+    try test_util.expectWithMessage(
+        hasAllowedPrefix("OTEL_SDK_DISABLED", " OTEL_ , CUSTOM_PREFIX_ ,, VENDOR_ "),
+        "OTEL_SDK_DISABLED should match OTEL_",
+    );
+    try test_util.expectWithMessage(
+        hasAllowedPrefix("CUSTOM_PREFIX_ACCESS_TOKEN", " OTEL_ , CUSTOM_PREFIX_ ,, VENDOR_ "),
+        "CUSTOM_PREFIX_ACCESS_TOKEN should match CUSTOM_PREFIX_",
+    );
+    try test_util.expectWithMessage(
+        hasAllowedPrefix("VENDOR_TRACE_MODE", " OTEL_ , CUSTOM_PREFIX_ ,, VENDOR_ "),
+        "VENDOR_TRACE_MODE should match VENDOR_",
+    );
+    try test_util.expectWithMessage(
+        !hasAllowedPrefix("PATH", " OTEL_ , CUSTOM_PREFIX_ ,, VENDOR_ "),
+        "PATH should not match any configured prefix",
+    );
+}
+
+test "readAllAgentsEnvFile: stores only variables matching allowed prefixes" {
+    // Derive the sample keys from the build's configured allowed prefixes so this test
+    // stays correct regardless of the -Dallowed-env-var-prefixes value it was built with.
+    const allowed_key = comptime blk: {
+        var prefixes = std.mem.splitScalar(u8, build_options.allowed_env_var_prefixes, ',');
+        while (prefixes.next()) |raw_prefix| {
+            const prefix = std.mem.trim(u8, raw_prefix, " \t\r\n");
+            if (prefix.len == 0) continue;
+            break :blk prefix ++ "TEST_ALLOWED_KEY";
+        }
+        @compileError("build has no non-empty allowed_env_var_prefixes");
+    };
+    const disallowed_key = comptime blk: {
+        // Pick a sentinel key that provably does not match any configured prefix.
+        const candidates = [_][]const u8{
+            "ZZZ_TEST_DISALLOWED_KEY",
+            "QQQ_TEST_DISALLOWED_KEY",
+            "JJJ_TEST_DISALLOWED_KEY",
+        };
+        for (candidates) |c| {
+            if (!hasAllowedPrefix(c, build_options.allowed_env_var_prefixes)) {
+                break :blk c;
+            }
+        }
+        @compileError("could not find a sentinel disallowed key for this build's allowed_env_var_prefixes");
+    };
+
+    const allocator = testing.allocator;
+
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    {
+        const file = try tmp_dir.dir.createFile("default_env.conf", .{});
+        defer file.close();
+        try file.writeAll(allowed_key ++ "=allowed-value\n" ++ disallowed_key ++ "=disallowed-value\n");
+    }
+
+    const absolute_path_to_env_file = try tmp_dir.dir.realpathAlloc(allocator, "default_env.conf");
+    defer allocator.free(absolute_path_to_env_file);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    var configuration = try createDefaultConfiguration(arena_allocator);
+    readAllAgentsEnvFile(arena_allocator, absolute_path_to_env_file, &configuration);
+
+    try testing.expectEqual(1, configuration.all_auto_instrumentation_agents_env_vars.count());
+    try testing.expectEqualStrings(
+        "allowed-value",
+        configuration.all_auto_instrumentation_agents_env_vars.get(allowed_key).?,
+    );
+    try test_util.expectWithMessage(
+        configuration.all_auto_instrumentation_agents_env_vars.get(disallowed_key) == null,
+        "key with disallowed prefix should not be loaded",
+    );
+}
+
+/// Unquotes a configuration value using shell-style quoting rules for the
+/// well-formed cases, with a deliberate divergence from bash for malformed
+/// input (see the "not shell-standard" note below).
+///
+/// - Values wrapped in matching `"..."`: the outer quotes are stripped and backslash
+///   escapes are processed only for `\"`, `\\`, `\$`, and `` \` `` — the backslash
+///   is consumed and the next character is kept. Any other `\<c>` is preserved
+///   verbatim (both the backslash and `c`), which matches bash's behavior inside
+///   double quotes: `"\n"`, `"\t"`, `"\z"` all stay literal two-character sequences.
+/// - Values wrapped in matching `'...'`: the outer quotes are stripped and no
+///   escape processing is performed. This matches bash single-quote semantics
+///   (a `'` cannot appear inside single quotes at all).
+/// - Values without matching surrounding quotes are returned unchanged. THIS IS
+///   NOT SHELL-STANDARD: bash would either report a syntax error or continue
+///   reading additional lines looking for a matching closing quote. This parser
+///   is line-oriented and does neither. Instead, parseLine emits a warning via
+///   `hasUnbalancedQuotes` so the user can spot the typo, and passes the value
+///   through literally rather than silently dropping the line.
+///
+/// May allocate on the arena when escape processing shortens the value.
+fn unquoteValue(arena_allocator: std.mem.Allocator, value: []const u8) std.mem.Allocator.Error![]u8 {
+    if (value.len >= 2) {
+        const first = value[0];
+        const last = value[value.len - 1];
+        if (first == last and (first == '"' or first == '\'')) {
+            const inner = value[1 .. value.len - 1];
+            if (first == '\'') {
+                return arena_allocator.dupe(u8, inner);
+            }
+            // Double-quoted: fast path when there are no backslashes to process.
+            if (std.mem.indexOfScalar(u8, inner, '\\') == null) {
+                return arena_allocator.dupe(u8, inner);
+            }
+            // Two-pass: compute the final length first so the returned slice
+            // length matches the underlying allocation exactly. That keeps
+            // callers using a GPA (e.g. tests) able to free the value cleanly.
+            var final_len: usize = 0;
+            var i: usize = 0;
+            while (i < inner.len) : (i += 1) {
+                if (isEscapedByBackslash(inner, i)) {
+                    i += 1;
+                }
+                final_len += 1;
+            }
+            const buf = try arena_allocator.alloc(u8, final_len);
+            var w: usize = 0;
+            i = 0;
+            while (i < inner.len) : (i += 1) {
+                if (isEscapedByBackslash(inner, i)) {
+                    buf[w] = inner[i + 1];
+                    w += 1;
+                    i += 1;
+                    continue;
+                }
+                buf[w] = inner[i];
+                w += 1;
+            }
+            return buf;
+        }
+    }
+    return arena_allocator.dupe(u8, value);
+}
+
+fn isEscapedByBackslash(inner: []const u8, i: usize) bool {
+    if (inner[i] != '\\' or i + 1 >= inner.len) return false;
+    const next = inner[i + 1];
+    return next == '"' or next == '\\' or next == '$' or next == '`';
+}
+
+/// Reports whether a raw value (as read from a config line, after whitespace
+/// trimming and before unquoteValue) contains quote characters that do not
+/// form a well-formed pair. Intended to catch user typos like `KEY="value`,
+/// `KEY=value"`, or `KEY=va"lue`.
+///
+/// This exists precisely because the parser diverges from shell semantics
+/// for malformed input: a shell would refuse to parse `KEY="value` (or keep
+/// reading until it finds a closing quote on a later line), but this parser
+/// is line-oriented and accepts the value literally. The warning surfaces
+/// that divergence so users can spot the mistake instead of only finding
+/// out when the downstream process rejects the injected env var.
+fn hasUnbalancedQuotes(value: []const u8) bool {
+    if (value.len >= 2) {
+        const first = value[0];
+        const last = value[value.len - 1];
+        if (first == last and (first == '"' or first == '\'')) {
+            const inner = value[1 .. value.len - 1];
+            if (first == '"') {
+                // Inside a double-quoted value, any unescaped " is stray.
+                var i: usize = 0;
+                while (i < inner.len) : (i += 1) {
+                    if (isEscapedByBackslash(inner, i)) {
+                        i += 1;
+                        continue;
+                    }
+                    if (inner[i] == '"') return true;
+                }
+                return false;
+            }
+            // Inside a single-quoted value, any ' is stray (bash cannot
+            // escape ' inside '...').
+            return std.mem.indexOfScalar(u8, inner, '\'') != null;
+        }
+    }
+    // No matching outer pair: any quote character in the value is stray.
+    return std.mem.indexOfAny(u8, value, "\"'") != null;
+}
+
+test "hasUnbalancedQuotes: balanced values" {
+    try testing.expectEqual(false, hasUnbalancedQuotes(""));
+    try testing.expectEqual(false, hasUnbalancedQuotes("plain"));
+    try testing.expectEqual(false, hasUnbalancedQuotes("\"quoted\""));
+    try testing.expectEqual(false, hasUnbalancedQuotes("'quoted'"));
+    try testing.expectEqual(false, hasUnbalancedQuotes("\"\""));
+    try testing.expectEqual(false, hasUnbalancedQuotes("''"));
+    // Escaped double quotes inside a double-quoted value are balanced.
+    try testing.expectEqual(false, hasUnbalancedQuotes("\"he said \\\"hi\\\"\""));
+    // Escaped backslash before an unrelated char is balanced.
+    try testing.expectEqual(false, hasUnbalancedQuotes("\"a\\\\b\""));
+    // Single quotes inside a double-quoted value are fine.
+    try testing.expectEqual(false, hasUnbalancedQuotes("\"don't\""));
+    // Double quotes inside a single-quoted value are fine.
+    try testing.expectEqual(false, hasUnbalancedQuotes("'he said \"hi\"'"));
+}
+
+test "hasUnbalancedQuotes: stray or unmatched quotes" {
+    // Unmatched leading double quote.
+    try testing.expectEqual(true, hasUnbalancedQuotes("\"value"));
+    // Unmatched trailing double quote.
+    try testing.expectEqual(true, hasUnbalancedQuotes("value\""));
+    // Interior double quote in an otherwise unquoted value.
+    try testing.expectEqual(true, hasUnbalancedQuotes("va\"lue"));
+    // Unmatched leading single quote (typical: apostrophe in unquoted word).
+    try testing.expectEqual(true, hasUnbalancedQuotes("don't"));
+    // Mismatched quote types on the outside.
+    try testing.expectEqual(true, hasUnbalancedQuotes("\"value'"));
+    try testing.expectEqual(true, hasUnbalancedQuotes("'value\""));
+    // Single stray character.
+    try testing.expectEqual(true, hasUnbalancedQuotes("\""));
+    try testing.expectEqual(true, hasUnbalancedQuotes("'"));
+    // Double-quoted value with unescaped " inside.
+    try testing.expectEqual(true, hasUnbalancedQuotes("\"\"nested\"\""));
+    // Single-quoted value with a ' inside (bash cannot escape ' in '...').
+    try testing.expectEqual(true, hasUnbalancedQuotes("'don\\'t'"));
+}
+
+/// Parses a single line from a configuration file.
+/// Returns a key-value pair if the line is a valid key-value pair, and null for empty
+/// lines, comments and invalid lines.
+fn parseLine(arena_allocator: std.mem.Allocator, line: []u8, cfg_file_path: []const u8) ?struct {
+    key: []const u8,
+    value: []u8,
+} {
+    var l = line;
+    if (std.mem.indexOfScalar(u8, l, '#')) |commentStartIdx| {
+        // strip end-of-line comment (might be the whole line if the line starts with #)
+        l = l[0..commentStartIdx];
+    }
+
+    const trimmed = std.mem.trim(u8, l, " \t\r\n");
+    if (trimmed.len == 0) {
+        // ignore empty lines or lines that only contain whitespace
+        return null;
+    }
+
+    if (std.mem.indexOfScalar(u8, trimmed, '=')) |equalsIdx| {
+        const key_trimmed = std.mem.trim(u8, trimmed[0..equalsIdx], " \t\r\n");
+        const key = std.fmt.allocPrint(arena_allocator, "{s}", .{key_trimmed}) catch |err| {
+            print.printError("error in allocPrint while allocating key from file {s}: {}", .{ cfg_file_path, err });
+            return null;
+        };
+        const value_trimmed = std.mem.trim(u8, trimmed[equalsIdx + 1 ..], " \t\r\n");
+        if (hasUnbalancedQuotes(value_trimmed)) {
+            // Divergence from shell semantics: bash would refuse to parse this
+            // (or keep reading additional lines looking for a matching closing
+            // quote). This parser is line-oriented, so it uses the value as-is
+            // and warns instead of failing.
+            print.printWarn(
+                "value for key \"{s}\" in {s} contains unbalanced or unquoted quote characters and will be used literally: {s}",
+                .{ key, cfg_file_path, value_trimmed },
+            );
+        }
+        const value = unquoteValue(arena_allocator, value_trimmed) catch |err| {
+            print.printError("error while allocating value from file {s}: {}", .{ cfg_file_path, err });
+            return null;
+        };
+        return .{
+            .key = key,
+            .value = value,
+        };
+    } else {
+        // ignore malformed lines
+        print.printError("cannot parse line in {s}: \"{s}\"", .{ cfg_file_path, line });
+        return null;
+    }
+}
+
+test "parseLine: empty line" {
+    const allocator = testing.allocator;
+    const result = parseLine(
+        allocator,
+        "",
+        "/path/to/configuration",
+    );
+    try test_util.expectWithMessage(result == null, "parseLine(\"\") returns null");
+}
+
+test "parseLine: whitespace only" {
+    const allocator = testing.allocator;
+    const line = try std.fmt.allocPrint(allocator, "  \t ", .{});
+    defer allocator.free(line);
+    const result = parseLine(
+        allocator,
+        line,
+        "/path/to/configuration",
+    );
+    try test_util.expectWithMessage(result == null, "parseLine(whitespace) returns null");
+}
+
+test "parseLine: full line comment" {
+    const allocator = testing.allocator;
+    const line = try std.fmt.allocPrint(allocator, "# this is a comment", .{});
+    defer allocator.free(line);
+    const result = parseLine(
+        allocator,
+        line,
+        "/path/to/configuration",
+    );
+    try test_util.expectWithMessage(result == null, "parseLine(full line comment) returns null");
+}
+
+test "parseLine: end of line comment" {
+    const allocator = testing.allocator;
+    const line = try std.fmt.allocPrint(allocator, "key=value # comment", .{});
+    defer allocator.free(line);
+    const result = parseLine(
+        allocator,
+        line,
+        "/path/to/configuration",
+    );
+    try test_util.expectWithMessage(result != null, "parseLine(end-of-line comment) returns key-value");
+    if (result) |kv| {
+        try testing.expectEqualStrings("key", kv.key);
+        try testing.expectEqualStrings("value", kv.value);
+        allocator.free(kv.key);
+        allocator.free(kv.value);
+    }
+}
+
+test "parseLine: valid key-value pair for unknown key" {
+    const allocator = testing.allocator;
+    const line = try std.fmt.allocPrint(allocator, "key=value", .{});
+    defer allocator.free(line);
+    const result = parseLine(
+        allocator,
+        line,
+        "/path/to/configuration",
+    );
+    try test_util.expectWithMessage(result != null, "parseLine(key-value pair/unknown key) returns key-value");
+    if (result) |kv| {
+        try testing.expectEqualStrings("key", kv.key);
+        try testing.expectEqualStrings("value", kv.value);
+        allocator.free(kv.key);
+        allocator.free(kv.value);
+    }
+}
+
+test "parseLine: valid key-value pair for known key" {
+    const allocator = testing.allocator;
+    const line = try std.fmt.allocPrint(allocator, "jvm_auto_instrumentation_agent_path=/custom/path/to/jvm/agent", .{});
+    defer allocator.free(line);
+    const result = parseLine(
+        allocator,
+        line,
+        "/path/to/configuration",
+    );
+    try test_util.expectWithMessage(result != null, "parseLine(key-value pair/known key) returns key-value");
+    if (result) |kv| {
+        try testing.expectEqualStrings("jvm_auto_instrumentation_agent_path", kv.key);
+        try testing.expectEqualStrings("/custom/path/to/jvm/agent", kv.value);
+        allocator.free(kv.key);
+        allocator.free(kv.value);
+    }
+}
+
+test "parseLine: valid key-value pair for known key with end-of-line comment" {
+    const allocator = testing.allocator;
+    const line = try std.fmt.allocPrint(allocator, "jvm_auto_instrumentation_agent_path=/custom/path/to/jvm/agent # comment", .{});
+    defer allocator.free(line);
+    const result = parseLine(
+        allocator,
+        line,
+        "/path/to/configuration",
+    );
+    try test_util.expectWithMessage(result != null, "parseLine(key-value pair/known key/eol comment) returns key-value");
+    if (result) |kv| {
+        try testing.expectEqualStrings("jvm_auto_instrumentation_agent_path", kv.key);
+        try testing.expectEqualStrings("/custom/path/to/jvm/agent", kv.value);
+        allocator.free(kv.key);
+        allocator.free(kv.value);
+    }
+}
+
+test "parseLine: valid key-value pair with whitespace" {
+    const allocator = testing.allocator;
+    const line = try std.fmt.allocPrint(allocator, "  jvm_auto_instrumentation_agent_path \t =  /custom/path/to/jvm/agent  ", .{});
+    defer allocator.free(line);
+    const result = parseLine(
+        allocator,
+        line,
+        "/path/to/configuration",
+    );
+    try test_util.expectWithMessage(result != null, "parseLine(key-value pair/known key/whitespace) returns key-value");
+    if (result) |kv| {
+        try testing.expectEqualStrings("jvm_auto_instrumentation_agent_path", kv.key);
+        try testing.expectEqualStrings("/custom/path/to/jvm/agent", kv.value);
+        allocator.free(kv.key);
+        allocator.free(kv.value);
+    }
+}
+
+test "parseLine: multiple equals characters" {
+    const allocator = testing.allocator;
+    const line = try std.fmt.allocPrint(allocator, "jvm_auto_instrumentation_agent_path=/path/with/=/character/===", .{});
+    defer allocator.free(line);
+    const result = parseLine(
+        allocator,
+        line,
+        "/path/to/configuration",
+    );
+    try test_util.expectWithMessage(result != null, "parseLine(key-value pair/known key/multiple equals) returns key-value");
+    if (result) |kv| {
+        try testing.expectEqualStrings("jvm_auto_instrumentation_agent_path", kv.key);
+        try testing.expectEqualStrings("/path/with/=/character/===", kv.value);
+        allocator.free(kv.key);
+        allocator.free(kv.value);
+    }
+}
+
+test "parseLine: invalid line (no = character)" {
+    const allocator = testing.allocator;
+    const line = try std.fmt.allocPrint(allocator, "this line is invalid", .{});
+    defer allocator.free(line);
+    const result = parseLine(
+        allocator,
+        line,
+        "/path/to/configuration",
+    );
+    try test_util.expectWithMessage(result == null, "parseLine(invalid line) returns null");
+}
+
+test "parseLine: invalid line (line too long)" {
+    const allocator = testing.allocator;
+    const line = try std.fmt.allocPrint(allocator, "this line is invalid", .{});
+    defer allocator.free(line);
+    const result = parseLine(
+        allocator,
+        line,
+        "/path/to/configuration",
+    );
+    try test_util.expectWithMessage(result == null, "parseLine(invalid line) returns null");
+}
+
+test "parseLine: strips surrounding double quotes from value" {
+    const allocator = testing.allocator;
+    const line = try std.fmt.allocPrint(allocator, "OTEL_EXPORTER_OTLP_PROTOCOL=\"http/protobuf\"", .{});
+    defer allocator.free(line);
+    const result = parseLine(
+        allocator,
+        line,
+        "/path/to/configuration",
+    );
+    try test_util.expectWithMessage(result != null, "parseLine(double-quoted value) returns key-value");
+    if (result) |kv| {
+        try testing.expectEqualStrings("OTEL_EXPORTER_OTLP_PROTOCOL", kv.key);
+        try testing.expectEqualStrings("http/protobuf", kv.value);
+        allocator.free(kv.key);
+        allocator.free(kv.value);
+    }
+}
+
+test "parseLine: strips surrounding single quotes from value" {
+    const allocator = testing.allocator;
+    const line = try std.fmt.allocPrint(allocator, "OTEL_EXPORTER_OTLP_ENDPOINT='https://example.com'", .{});
+    defer allocator.free(line);
+    const result = parseLine(
+        allocator,
+        line,
+        "/path/to/configuration",
+    );
+    try test_util.expectWithMessage(result != null, "parseLine(single-quoted value) returns key-value");
+    if (result) |kv| {
+        try testing.expectEqualStrings("OTEL_EXPORTER_OTLP_ENDPOINT", kv.key);
+        try testing.expectEqualStrings("https://example.com", kv.value);
+        allocator.free(kv.key);
+        allocator.free(kv.value);
+    }
+}
+
+test "parseLine: strips surrounding quotes around whitespace" {
+    const allocator = testing.allocator;
+    // Whitespace inside the quotes must be preserved, only whitespace outside the
+    // quotes is trimmed.
+    const line = try std.fmt.allocPrint(allocator, "  key  =  \"  value with spaces  \"  ", .{});
+    defer allocator.free(line);
+    const result = parseLine(
+        allocator,
+        line,
+        "/path/to/configuration",
+    );
+    try test_util.expectWithMessage(result != null, "parseLine(quoted value with padding) returns key-value");
+    if (result) |kv| {
+        try testing.expectEqualStrings("key", kv.key);
+        try testing.expectEqualStrings("  value with spaces  ", kv.value);
+        allocator.free(kv.key);
+        allocator.free(kv.value);
+    }
+}
+
+test "parseLine: preserves inner quotes and only strips one surrounding pair" {
+    const allocator = testing.allocator;
+    const line = try std.fmt.allocPrint(allocator, "key=\"\"nested\"\"", .{});
+    defer allocator.free(line);
+    const result = parseLine(
+        allocator,
+        line,
+        "/path/to/configuration",
+    );
+    try test_util.expectWithMessage(result != null, "parseLine(nested quotes) returns key-value");
+    if (result) |kv| {
+        try testing.expectEqualStrings("key", kv.key);
+        try testing.expectEqualStrings("\"nested\"", kv.value);
+        allocator.free(kv.key);
+        allocator.free(kv.value);
+    }
+}
+
+test "parseLine: preserves unbalanced quotes" {
+    const allocator = testing.allocator;
+    const line = try std.fmt.allocPrint(allocator, "key=\"unbalanced", .{});
+    defer allocator.free(line);
+    const result = parseLine(
+        allocator,
+        line,
+        "/path/to/configuration",
+    );
+    try test_util.expectWithMessage(result != null, "parseLine(unbalanced quote) returns key-value");
+    if (result) |kv| {
+        try testing.expectEqualStrings("key", kv.key);
+        try testing.expectEqualStrings("\"unbalanced", kv.value);
+        allocator.free(kv.key);
+        allocator.free(kv.value);
+    }
+}
+
+test "parseLine: preserves mismatched quote characters" {
+    const allocator = testing.allocator;
+    const line = try std.fmt.allocPrint(allocator, "key=\"mismatched'", .{});
+    defer allocator.free(line);
+    const result = parseLine(
+        allocator,
+        line,
+        "/path/to/configuration",
+    );
+    try test_util.expectWithMessage(result != null, "parseLine(mismatched quote types) returns key-value");
+    if (result) |kv| {
+        try testing.expectEqualStrings("key", kv.key);
+        try testing.expectEqualStrings("\"mismatched'", kv.value);
+        allocator.free(kv.key);
+        allocator.free(kv.value);
+    }
+}
+
+test "parseLine: empty double-quoted value becomes empty string" {
+    const allocator = testing.allocator;
+    const line = try std.fmt.allocPrint(allocator, "key=\"\"", .{});
+    defer allocator.free(line);
+    const result = parseLine(
+        allocator,
+        line,
+        "/path/to/configuration",
+    );
+    try test_util.expectWithMessage(result != null, "parseLine(empty quoted value) returns key-value");
+    if (result) |kv| {
+        try testing.expectEqualStrings("key", kv.key);
+        try testing.expectEqualStrings("", kv.value);
+        allocator.free(kv.key);
+        allocator.free(kv.value);
+    }
+}
+
+test "parseLine: single quote character is preserved" {
+    const allocator = testing.allocator;
+    const line = try std.fmt.allocPrint(allocator, "key=\"", .{});
+    defer allocator.free(line);
+    const result = parseLine(
+        allocator,
+        line,
+        "/path/to/configuration",
+    );
+    try test_util.expectWithMessage(result != null, "parseLine(single quote char) returns key-value");
+    if (result) |kv| {
+        try testing.expectEqualStrings("key", kv.key);
+        try testing.expectEqualStrings("\"", kv.value);
+        allocator.free(kv.key);
+        allocator.free(kv.value);
+    }
+}
+
+test "parseLine: quoted value with commas is preserved verbatim" {
+    const allocator = testing.allocator;
+    const line = try std.fmt.allocPrint(allocator, "OTEL_EXPORTER_OTLP_HEADERS=\"Authorization=Bearer%20abc,Custom-Header=value\"", .{});
+    defer allocator.free(line);
+    const result = parseLine(
+        allocator,
+        line,
+        "/path/to/configuration",
+    );
+    try test_util.expectWithMessage(result != null, "parseLine(quoted headers) returns key-value");
+    if (result) |kv| {
+        try testing.expectEqualStrings("OTEL_EXPORTER_OTLP_HEADERS", kv.key);
+        try testing.expectEqualStrings("Authorization=Bearer%20abc,Custom-Header=value", kv.value);
+        allocator.free(kv.key);
+        allocator.free(kv.value);
+    }
+}
+
+test "parseLine: empty single-quoted value" {
+    const allocator = testing.allocator;
+    const line = try std.fmt.allocPrint(allocator, "key=''", .{});
+    defer allocator.free(line);
+    const result = parseLine(
+        allocator,
+        line,
+        "/path/to/configuration",
+    );
+    try test_util.expectWithMessage(result != null, "parseLine(empty single-quoted) returns key-value");
+    if (result) |kv| {
+        try testing.expectEqualStrings("key", kv.key);
+        try testing.expectEqualStrings("", kv.value);
+        allocator.free(kv.key);
+        allocator.free(kv.value);
+    }
+}
+
+test "parseLine: unbalanced single quote is preserved" {
+    const allocator = testing.allocator;
+    const line = try std.fmt.allocPrint(allocator, "key='unbalanced", .{});
+    defer allocator.free(line);
+    const result = parseLine(
+        allocator,
+        line,
+        "/path/to/configuration",
+    );
+    try test_util.expectWithMessage(result != null, "parseLine(unbalanced single quote) returns key-value");
+    if (result) |kv| {
+        try testing.expectEqualStrings("key", kv.key);
+        try testing.expectEqualStrings("'unbalanced", kv.value);
+        allocator.free(kv.key);
+        allocator.free(kv.value);
+    }
+}
+
+// --- Double-quoted escape processing ---
+
+test "parseLine: double quote escapes an inner double quote" {
+    const allocator = testing.allocator;
+    const line = try std.fmt.allocPrint(allocator, "key=\"a\\\"b\"", .{});
+    defer allocator.free(line);
+    const result = parseLine(
+        allocator,
+        line,
+        "/path/to/configuration",
+    );
+    try test_util.expectWithMessage(result != null, "parseLine(\\\") returns key-value");
+    if (result) |kv| {
+        try testing.expectEqualStrings("key", kv.key);
+        try testing.expectEqualStrings("a\"b", kv.value);
+        allocator.free(kv.key);
+        allocator.free(kv.value);
+    }
+}
+
+test "parseLine: double quote escapes a backslash" {
+    const allocator = testing.allocator;
+    const line = try std.fmt.allocPrint(allocator, "key=\"a\\\\b\"", .{});
+    defer allocator.free(line);
+    const result = parseLine(
+        allocator,
+        line,
+        "/path/to/configuration",
+    );
+    try test_util.expectWithMessage(result != null, "parseLine(\\\\) returns key-value");
+    if (result) |kv| {
+        try testing.expectEqualStrings("key", kv.key);
+        try testing.expectEqualStrings("a\\b", kv.value);
+        allocator.free(kv.key);
+        allocator.free(kv.value);
+    }
+}
+
+test "parseLine: double quote escapes a dollar sign" {
+    const allocator = testing.allocator;
+    const line = try std.fmt.allocPrint(allocator, "key=\"a\\$b\"", .{});
+    defer allocator.free(line);
+    const result = parseLine(
+        allocator,
+        line,
+        "/path/to/configuration",
+    );
+    try test_util.expectWithMessage(result != null, "parseLine(\\$) returns key-value");
+    if (result) |kv| {
+        try testing.expectEqualStrings("key", kv.key);
+        try testing.expectEqualStrings("a$b", kv.value);
+        allocator.free(kv.key);
+        allocator.free(kv.value);
+    }
+}
+
+test "parseLine: double quote escapes a backtick" {
+    const allocator = testing.allocator;
+    const line = try std.fmt.allocPrint(allocator, "key=\"a\\`b\"", .{});
+    defer allocator.free(line);
+    const result = parseLine(
+        allocator,
+        line,
+        "/path/to/configuration",
+    );
+    try test_util.expectWithMessage(result != null, "parseLine(\\`) returns key-value");
+    if (result) |kv| {
+        try testing.expectEqualStrings("key", kv.key);
+        try testing.expectEqualStrings("a`b", kv.value);
+        allocator.free(kv.key);
+        allocator.free(kv.value);
+    }
+}
+
+test "parseLine: double-quoted \\n is a literal two-character sequence" {
+    // Matches bash: \n inside double quotes is NOT a newline.
+    const allocator = testing.allocator;
+    const line = try std.fmt.allocPrint(allocator, "key=\"a\\nb\"", .{});
+    defer allocator.free(line);
+    const result = parseLine(
+        allocator,
+        line,
+        "/path/to/configuration",
+    );
+    try test_util.expectWithMessage(result != null, "parseLine(\\n literal) returns key-value");
+    if (result) |kv| {
+        try testing.expectEqualStrings("key", kv.key);
+        try testing.expectEqualStrings("a\\nb", kv.value);
+        allocator.free(kv.key);
+        allocator.free(kv.value);
+    }
+}
+
+test "parseLine: double-quoted \\t is a literal two-character sequence" {
+    const allocator = testing.allocator;
+    const line = try std.fmt.allocPrint(allocator, "key=\"a\\tb\"", .{});
+    defer allocator.free(line);
+    const result = parseLine(
+        allocator,
+        line,
+        "/path/to/configuration",
+    );
+    try test_util.expectWithMessage(result != null, "parseLine(\\t literal) returns key-value");
+    if (result) |kv| {
+        try testing.expectEqualStrings("key", kv.key);
+        try testing.expectEqualStrings("a\\tb", kv.value);
+        allocator.free(kv.key);
+        allocator.free(kv.value);
+    }
+}
+
+test "parseLine: double-quoted unknown escape stays literal" {
+    // Bash: \<c> for c not in {$, `, \", \\, newline} keeps both chars.
+    const allocator = testing.allocator;
+    const line = try std.fmt.allocPrint(allocator, "key=\"a\\zb\"", .{});
+    defer allocator.free(line);
+    const result = parseLine(
+        allocator,
+        line,
+        "/path/to/configuration",
+    );
+    try test_util.expectWithMessage(result != null, "parseLine(\\z literal) returns key-value");
+    if (result) |kv| {
+        try testing.expectEqualStrings("key", kv.key);
+        try testing.expectEqualStrings("a\\zb", kv.value);
+        allocator.free(kv.key);
+        allocator.free(kv.value);
+    }
+}
+
+test "parseLine: escaped quote as sole content produces a single quote character" {
+    const allocator = testing.allocator;
+    const line = try std.fmt.allocPrint(allocator, "key=\"\\\"\"", .{});
+    defer allocator.free(line);
+    const result = parseLine(
+        allocator,
+        line,
+        "/path/to/configuration",
+    );
+    try test_util.expectWithMessage(result != null, "parseLine(escaped quote only) returns key-value");
+    if (result) |kv| {
+        try testing.expectEqualStrings("key", kv.key);
+        try testing.expectEqualStrings("\"", kv.value);
+        allocator.free(kv.key);
+        allocator.free(kv.value);
+    }
+}
+
+test "parseLine: mixed escapes \\\\ then \\\"" {
+    const allocator = testing.allocator;
+    const line = try std.fmt.allocPrint(allocator, "key=\"\\\\\\\"\"", .{});
+    defer allocator.free(line);
+    const result = parseLine(
+        allocator,
+        line,
+        "/path/to/configuration",
+    );
+    try test_util.expectWithMessage(result != null, "parseLine(\\\\\\\") returns key-value");
+    if (result) |kv| {
+        try testing.expectEqualStrings("key", kv.key);
+        try testing.expectEqualStrings("\\\"", kv.value);
+        allocator.free(kv.key);
+        allocator.free(kv.value);
+    }
+}
+
+// --- Single-quoted values: no escape processing ---
+
+test "parseLine: single-quoted backslash-quote is literal" {
+    const allocator = testing.allocator;
+    const line = try std.fmt.allocPrint(allocator, "key='a\\\"b'", .{});
+    defer allocator.free(line);
+    const result = parseLine(
+        allocator,
+        line,
+        "/path/to/configuration",
+    );
+    try test_util.expectWithMessage(result != null, "parseLine(single-quoted \\\") returns key-value");
+    if (result) |kv| {
+        try testing.expectEqualStrings("key", kv.key);
+        try testing.expectEqualStrings("a\\\"b", kv.value);
+        allocator.free(kv.key);
+        allocator.free(kv.value);
+    }
+}
+
+test "parseLine: single-quoted double backslash is literal" {
+    const allocator = testing.allocator;
+    const line = try std.fmt.allocPrint(allocator, "key='a\\\\b'", .{});
+    defer allocator.free(line);
+    const result = parseLine(
+        allocator,
+        line,
+        "/path/to/configuration",
+    );
+    try test_util.expectWithMessage(result != null, "parseLine(single-quoted \\\\) returns key-value");
+    if (result) |kv| {
+        try testing.expectEqualStrings("key", kv.key);
+        try testing.expectEqualStrings("a\\\\b", kv.value);
+        allocator.free(kv.key);
+        allocator.free(kv.value);
+    }
+}
+
+test "parseLine: single-quoted dollar sign is literal" {
+    const allocator = testing.allocator;
+    const line = try std.fmt.allocPrint(allocator, "key='a$b'", .{});
+    defer allocator.free(line);
+    const result = parseLine(
+        allocator,
+        line,
+        "/path/to/configuration",
+    );
+    try test_util.expectWithMessage(result != null, "parseLine(single-quoted $) returns key-value");
+    if (result) |kv| {
+        try testing.expectEqualStrings("key", kv.key);
+        try testing.expectEqualStrings("a$b", kv.value);
+        allocator.free(kv.key);
+        allocator.free(kv.value);
+    }
+}
+
+test "parseLine: single-quoted backslash-n is literal" {
+    const allocator = testing.allocator;
+    const line = try std.fmt.allocPrint(allocator, "key='a\\nb'", .{});
+    defer allocator.free(line);
+    const result = parseLine(
+        allocator,
+        line,
+        "/path/to/configuration",
+    );
+    try test_util.expectWithMessage(result != null, "parseLine(single-quoted \\n literal) returns key-value");
+    if (result) |kv| {
+        try testing.expectEqualStrings("key", kv.key);
+        try testing.expectEqualStrings("a\\nb", kv.value);
+        allocator.free(kv.key);
+        allocator.free(kv.value);
+    }
+}
+
+// --- Trailing-backslash edge cases (bash would treat these as unmatched
+//     quotes / line continuation; a line-oriented parser cannot, so we keep
+//     the backslash literal). ---
+
+test "parseLine: unquoted value with interior double quote is preserved literally" {
+    // This should also emit a warning, but the parser still returns the value
+    // rather than dropping it — losing a line silently would be worse than
+    // passing through a possibly-mistyped value.
+    const allocator = testing.allocator;
+    const line = try std.fmt.allocPrint(allocator, "a=b\"c", .{});
+    defer allocator.free(line);
+    const result = parseLine(
+        allocator,
+        line,
+        "/path/to/configuration",
+    );
+    try test_util.expectWithMessage(result != null, "parseLine(interior stray quote) returns key-value");
+    if (result) |kv| {
+        try testing.expectEqualStrings("a", kv.key);
+        try testing.expectEqualStrings("b\"c", kv.value);
+        allocator.free(kv.key);
+        allocator.free(kv.value);
+    }
+}
+
+test "parseLine: trailing backslash inside double quotes is literal" {
+    const allocator = testing.allocator;
+    // The inner content after stripping outer quotes is `a\`. The trailing
+    // backslash has no following character to escape, so it stays literal.
+    const line = try std.fmt.allocPrint(allocator, "key=\"a\\\"", .{});
+    defer allocator.free(line);
+    const result = parseLine(
+        allocator,
+        line,
+        "/path/to/configuration",
+    );
+    try test_util.expectWithMessage(result != null, "parseLine(trailing backslash) returns key-value");
+    if (result) |kv| {
+        try testing.expectEqualStrings("key", kv.key);
+        try testing.expectEqualStrings("a\\", kv.value);
+        allocator.free(kv.key);
+        allocator.free(kv.value);
+    }
+}
+
+fn readConfigurationFromEnvironment(arena_allocator: std.mem.Allocator, configuration: *InjectorConfiguration, getenv_fn: proc_self_environ_parser.GetenvFn) void {
+    if (getenv_fn(arena_allocator, dotnet_agent_path_prefix_env_var)) |value| {
+        const trimmed_value = std.mem.trim(u8, value, " \t\r\n");
+        const dotnet_value = std.fmt.allocPrint(arena_allocator, "{s}", .{trimmed_value}) catch |err| {
+            print.printError("Cannot allocate memory to read the injector configuration from the environment: {}", .{err});
+            return;
+        };
+        configuration.dotnet_auto_instrumentation_agent_path_prefix = dotnet_value;
+    }
+    if (getenv_fn(arena_allocator, dotnet_minimum_dotnet_major_version_env_var)) |value| {
+        applyDotnetMinimumDotnetMajorVersionValue(value, dotnet_minimum_dotnet_major_version_env_var, configuration);
+    }
+    if (getenv_fn(arena_allocator, jvm_agent_path_env_var)) |value| {
+        const trimmed_value = std.mem.trim(u8, value, " \t\r\n");
+        const jvm_value = std.fmt.allocPrint(arena_allocator, "{s}", .{trimmed_value}) catch |err| {
+            print.printError("Cannot allocate memory to read the injector configuration from the environment: {}", .{err});
+            return;
+        };
+        configuration.jvm_auto_instrumentation_agent_path = jvm_value;
+    }
+    if (getenv_fn(arena_allocator, nodejs_agent_path_env_var)) |value| {
+        const trimmed_value = std.mem.trim(u8, value, " \t\r\n");
+        const nodejs_value = std.fmt.allocPrint(arena_allocator, "{s}", .{trimmed_value}) catch |err| {
+            print.printError("Cannot allocate memory to read the injector configuration from the environment: {}", .{err});
+            return;
+        };
+        configuration.nodejs_auto_instrumentation_agent_path = nodejs_value;
+    }
+    if (getenv_fn(arena_allocator, python_agent_path_prefix_env_var)) |value| {
+        const trimmed_value = std.mem.trim(u8, value, " \t\r\n");
+        const python_value = std.fmt.allocPrint(arena_allocator, "{s}", .{trimmed_value}) catch |err| {
+            print.printError("Cannot allocate memory to read the injector configuration from the environment: {}", .{err});
+            return;
+        };
+        configuration.python_auto_instrumentation_agent_path_prefix = python_value;
+    }
+    if (getenv_fn(arena_allocator, ruby_agent_path_prefix_env_var)) |value| {
+        const trimmed_value = std.mem.trim(u8, value, " \t\r\n");
+        const ruby_value = std.fmt.allocPrint(arena_allocator, "{s}", .{trimmed_value}) catch |err| {
+            print.printError("Cannot allocate memory to read the injector configuration from the environment: {}", .{err});
+            return;
+        };
+        configuration.ruby_auto_instrumentation_agent_path_prefix = ruby_value;
+    }
+    if (getenv_fn(arena_allocator, auto_instrumentation_disabled_env_var)) |value| {
+        const trimmed_value = std.mem.trim(u8, value, " \t\r\n");
+        applyAutoInstrumentationDisabledValue(trimmed_value, auto_instrumentation_disabled_env_var, configuration);
+    }
+    if (getenv_fn(arena_allocator, include_paths_env_var)) |value| {
+        const trimmed_value = std.mem.trim(u8, value, " \t\r\n");
+        const include_paths_value = std.fmt.allocPrint(arena_allocator, "{s}", .{trimmed_value}) catch |err| {
+            print.printError("Cannot allocate memory to read the injector configuration from the environment: {}", .{err});
+            return;
+        };
+        configuration.include_paths = patterns_util.splitByComma(arena_allocator, include_paths_value) catch |err| {
+            print.printError("error parsing include_paths value from the environment {s}: {}", .{ include_paths_value, err });
+            return;
+        };
+    }
+    if (getenv_fn(arena_allocator, exclude_paths_env_var)) |value| {
+        const trimmed_value = std.mem.trim(u8, value, " \t\r\n");
+        const exclude_paths_value = std.fmt.allocPrint(arena_allocator, "{s}", .{trimmed_value}) catch |err| {
+            print.printError("Cannot allocate memory to read the injector configuration from the environment: {}", .{err});
+            return;
+        };
+        configuration.exclude_paths = patterns_util.splitByComma(arena_allocator, exclude_paths_value) catch |err| {
+            print.printError("error parsing exclude_paths value from the environment {s}: {}", .{ exclude_paths_value, err });
+            return;
+        };
+    }
+    if (getenv_fn(arena_allocator, include_args_env_var)) |value| {
+        const trimmed_value = std.mem.trim(u8, value, " \t\r\n");
+        const include_args_value = std.fmt.allocPrint(arena_allocator, "{s}", .{trimmed_value}) catch |err| {
+            print.printError("Cannot allocate memory to read the injector configuration from the environment: {}", .{err});
+            return;
+        };
+        configuration.include_args = patterns_util.splitByComma(arena_allocator, include_args_value) catch |err| {
+            print.printError("error parsing include_arguments value from the environment {s}: {}", .{ include_args_value, err });
+            return;
+        };
+    }
+    if (getenv_fn(arena_allocator, exclude_args_env_var)) |value| {
+        const trimmed_value = std.mem.trim(u8, value, " \t\r\n");
+        const exclude_args_value = std.fmt.allocPrint(arena_allocator, "{s}", .{trimmed_value}) catch |err| {
+            print.printError("Cannot allocate memory to read the injector configuration from the environment: {}", .{err});
+            return;
+        };
+        configuration.exclude_args = patterns_util.splitByComma(arena_allocator, exclude_args_value) catch |err| {
+            print.printError("error parsing exclude_arguments value from the environment {s}: {}", .{ exclude_args_value, err });
+            return;
+        };
+    }
+}
+
+test "readConfigurationFromEnvironment: empty environment values" {
+    const allocator = testing.allocator;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    const original_environ = try test_util.clearStdCEnviron();
+    defer test_util.resetStdCEnviron(original_environ);
+
+    var configuration = try createDefaultConfiguration(arena_allocator);
+    readConfigurationFromEnvironment(arena_allocator, &configuration, proc_self_environ_parser.posixGetenv);
+
+    try testing.expectEqualStrings(
+        default_dotnet_auto_instrumentation_agent_path_prefix,
+        configuration.dotnet_auto_instrumentation_agent_path_prefix,
+    );
+    try testing.expectEqualStrings(
+        default_jvm_auto_instrumentation_agent_path,
+        configuration.jvm_auto_instrumentation_agent_path,
+    );
+    try testing.expectEqualStrings(
+        default_nodejs_auto_instrumentation_agent_path,
+        configuration.nodejs_auto_instrumentation_agent_path,
+    );
+    try testing.expectEqualStrings(
+        default_python_auto_instrumentation_agent_path,
+        configuration.python_auto_instrumentation_agent_path_prefix,
+    );
+    try testing.expectEqualStrings(
+        default_all_auto_instrumentation_agents_env_path,
+        configuration.all_auto_instrumentation_agents_env_path,
+    );
+    try testing.expectEqual(0, configuration.include_paths.len);
+    try testing.expectEqual(0, configuration.exclude_paths.len);
+    try testing.expectEqual(0, configuration.include_args.len);
+    try testing.expectEqual(0, configuration.exclude_args.len);
+}
+
+test "readConfigurationFromEnvironment: all values" {
+    const allocator = testing.allocator;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    const original_environ = try test_util.setStdCEnviron(&[9][]const u8{
+        "DOTNET_AUTO_INSTRUMENTATION_AGENT_PATH_PREFIX=/path/from/env/var/dotnet",
+        "DOTNET_AUTO_INSTRUMENTATION_MINIMUM_DOTNET_MAJOR_VERSION=6",
+        "JVM_AUTO_INSTRUMENTATION_AGENT_PATH=/path/from/env/var/jvm",
+        "NODEJS_AUTO_INSTRUMENTATION_AGENT_PATH=/path/from/env/var/nodejs",
+        "PYTHON_AUTO_INSTRUMENTATION_AGENT_PATH_PREFIX=/path/from/env/var/python",
+        "OTEL_INJECTOR_INCLUDE_PATHS=/path/from/env/var/include1,/path/from/env/var/include2",
+        "OTEL_INJECTOR_EXCLUDE_PATHS=/path/from/env/var/exclude1,/path/from/env/var/exclude2",
+        "OTEL_INJECTOR_INCLUDE_WITH_ARGUMENTS=--from-env-var-include1,--from-env-var-include2",
+        "OTEL_INJECTOR_EXCLUDE_WITH_ARGUMENTS=--from-env-var-exclude1,--from-env-var-exclude2",
+    });
+    defer test_util.resetStdCEnviron(original_environ);
+
+    var configuration = try createDefaultConfiguration(arena_allocator);
+    readConfigurationFromEnvironment(arena_allocator, &configuration, proc_self_environ_parser.posixGetenv);
+
+    try testing.expectEqualStrings(
+        "/path/from/env/var/dotnet",
+        configuration.dotnet_auto_instrumentation_agent_path_prefix,
+    );
+    try testing.expectEqual(@as(u32, 6), configuration.dotnet_auto_instrumentation_minimum_dotnet_major_version);
+    try testing.expectEqualStrings(
+        "/path/from/env/var/jvm",
+        configuration.jvm_auto_instrumentation_agent_path,
+    );
+    try testing.expectEqualStrings(
+        "/path/from/env/var/nodejs",
+        configuration.nodejs_auto_instrumentation_agent_path,
+    );
+    try testing.expectEqualStrings(
+        "/path/from/env/var/python",
+        configuration.python_auto_instrumentation_agent_path_prefix,
+    );
+    try testing.expectEqualStrings(
+        default_all_auto_instrumentation_agents_env_path,
+        configuration.all_auto_instrumentation_agents_env_path,
+    );
+    try testing.expectEqual(2, configuration.include_paths.len);
+    try testing.expectEqualStrings("/path/from/env/var/include1", configuration.include_paths[0]);
+    try testing.expectEqualStrings("/path/from/env/var/include2", configuration.include_paths[1]);
+    try testing.expectEqual(2, configuration.exclude_paths.len);
+    try testing.expectEqualStrings("/path/from/env/var/exclude1", configuration.exclude_paths[0]);
+    try testing.expectEqualStrings("/path/from/env/var/exclude2", configuration.exclude_paths[1]);
+    try testing.expectEqual(2, configuration.include_args.len);
+    try testing.expectEqualStrings("--from-env-var-include1", configuration.include_args[0]);
+    try testing.expectEqualStrings("--from-env-var-include2", configuration.include_args[1]);
+    try testing.expectEqual(2, configuration.exclude_args.len);
+    try testing.expectEqualStrings("--from-env-var-exclude1", configuration.exclude_args[0]);
+    try testing.expectEqualStrings("--from-env-var-exclude2", configuration.exclude_args[1]);
+}
+
+test "readConfigurationFromEnvironment: OTEL_INJECTOR_AUTO_INSTRUMENTATION_DISABLED=* disables all runtimes" {
+    const allocator = testing.allocator;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    const original_environ = try test_util.setStdCEnviron(&[1][]const u8{
+        "OTEL_INJECTOR_AUTO_INSTRUMENTATION_DISABLED=*",
+    });
+    defer test_util.resetStdCEnviron(original_environ);
+
+    var configuration = try createDefaultConfiguration(arena_allocator);
+    readConfigurationFromEnvironment(arena_allocator, &configuration, proc_self_environ_parser.posixGetenv);
+
+    try test_util.expectWithMessage(configuration.dotnet_instrumentation_disabled, "configuration.dotnet_instrumentation_disabled");
+    try test_util.expectWithMessage(configuration.jvm_instrumentation_disabled, "configuration.jvm_instrumentation_disabled");
+    try test_util.expectWithMessage(configuration.nodejs_instrumentation_disabled, "configuration.nodejs_instrumentation_disabled");
+    try test_util.expectWithMessage(configuration.python_instrumentation_disabled, "configuration.python_instrumentation_disabled");
+}
+
+test "readConfigurationFromEnvironment: OTEL_INJECTOR_AUTO_INSTRUMENTATION_DISABLED with specific runtimes" {
+    const allocator = testing.allocator;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    const original_environ = try test_util.setStdCEnviron(&[1][]const u8{
+        "OTEL_INJECTOR_AUTO_INSTRUMENTATION_DISABLED=nodejs,python",
+    });
+    defer test_util.resetStdCEnviron(original_environ);
+
+    var configuration = try createDefaultConfiguration(arena_allocator);
+    readConfigurationFromEnvironment(arena_allocator, &configuration, proc_self_environ_parser.posixGetenv);
+
+    try test_util.expectWithMessage(!configuration.dotnet_instrumentation_disabled, "!configuration.dotnet_instrumentation_disabled");
+    try test_util.expectWithMessage(!configuration.jvm_instrumentation_disabled, "!configuration.jvm_instrumentation_disabled");
+    try test_util.expectWithMessage(configuration.nodejs_instrumentation_disabled, "configuration.nodejs_instrumentation_disabled");
+    try test_util.expectWithMessage(configuration.python_instrumentation_disabled, "configuration.python_instrumentation_disabled");
+}
+
+test "readConfigurationFromEnvironment: OTEL_INJECTOR_AUTO_INSTRUMENTATION_DISABLED with all runtimes individually" {
+    const allocator = testing.allocator;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    const original_environ = try test_util.setStdCEnviron(&[1][]const u8{
+        "OTEL_INJECTOR_AUTO_INSTRUMENTATION_DISABLED=dotnet,jvm,nodejs,python",
+    });
+    defer test_util.resetStdCEnviron(original_environ);
+
+    var configuration = try createDefaultConfiguration(arena_allocator);
+    readConfigurationFromEnvironment(arena_allocator, &configuration, proc_self_environ_parser.posixGetenv);
+
+    try test_util.expectWithMessage(configuration.dotnet_instrumentation_disabled, "configuration.dotnet_instrumentation_disabled");
+    try test_util.expectWithMessage(configuration.jvm_instrumentation_disabled, "configuration.jvm_instrumentation_disabled");
+    try test_util.expectWithMessage(configuration.nodejs_instrumentation_disabled, "configuration.nodejs_instrumentation_disabled");
+    try test_util.expectWithMessage(configuration.python_instrumentation_disabled, "configuration.python_instrumentation_disabled");
+}
+
+test "readConfigurationFromEnvironment: OTEL_INJECTOR_AUTO_INSTRUMENTATION_DISABLED with unknown runtime is ignored" {
+    const allocator = testing.allocator;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    const original_environ = try test_util.setStdCEnviron(&[1][]const u8{
+        "OTEL_INJECTOR_AUTO_INSTRUMENTATION_DISABLED=nodejs,unknown,nodejs",
+    });
+    defer test_util.resetStdCEnviron(original_environ);
+
+    var configuration = try createDefaultConfiguration(arena_allocator);
+    readConfigurationFromEnvironment(arena_allocator, &configuration, proc_self_environ_parser.posixGetenv);
+
+    try test_util.expectWithMessage(!configuration.dotnet_instrumentation_disabled, "!configuration.dotnet_instrumentation_disabled");
+    try test_util.expectWithMessage(!configuration.jvm_instrumentation_disabled, "!configuration.jvm_instrumentation_disabled");
+    try test_util.expectWithMessage(configuration.nodejs_instrumentation_disabled, "configuration.nodejs_instrumentation_disabled");
+    try test_util.expectWithMessage(!configuration.python_instrumentation_disabled, "!configuration.python_instrumentation_disabled");
+}
+
+test "readConfigurationFromEnvironment: if OTEL_INJECTOR_AUTO_INSTRUMENTATION_DISABLED is not set, all runtimes are enabled" {
+    const allocator = testing.allocator;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    const original_environ = try test_util.clearStdCEnviron();
+    defer test_util.resetStdCEnviron(original_environ);
+
+    var configuration = try createDefaultConfiguration(arena_allocator);
+    readConfigurationFromEnvironment(arena_allocator, &configuration, proc_self_environ_parser.posixGetenv);
+
+    try test_util.expectWithMessage(!configuration.dotnet_instrumentation_disabled, "!configuration.dotnet_instrumentation_disabled");
+    try test_util.expectWithMessage(!configuration.jvm_instrumentation_disabled, "!configuration.jvm_instrumentation_disabled");
+    try test_util.expectWithMessage(!configuration.nodejs_instrumentation_disabled, "!configuration.nodejs_instrumentation_disabled");
+    try test_util.expectWithMessage(!configuration.python_instrumentation_disabled, "!configuration.python_instrumentation_disabled");
+}
+
+test "readConfigurationDirectory: directory does not exist" {
+    const allocator = testing.allocator;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    const original_environ = try test_util.setStdCEnviron(&[1][]const u8{
+        "OTEL_INJECTOR_CONFIG_DIR=/does/not/exist",
+    });
+    defer test_util.resetStdCEnviron(original_environ);
+
+    var configuration = try createDefaultConfiguration(arena_allocator);
+    readConfigurationDirectory(arena_allocator, &configuration);
+
+    // Configuration should remain at defaults when the directory does not exist.
+    try testing.expectEqualStrings(
+        default_dotnet_auto_instrumentation_agent_path_prefix,
+        configuration.dotnet_auto_instrumentation_agent_path_prefix,
+    );
+    try testing.expectEqualStrings(
+        default_jvm_auto_instrumentation_agent_path,
+        configuration.jvm_auto_instrumentation_agent_path,
+    );
+    try testing.expectEqualStrings(
+        default_nodejs_auto_instrumentation_agent_path,
+        configuration.nodejs_auto_instrumentation_agent_path,
+    );
+}
+
+test "readConfigurationDirectory: reads .conf files in alphabetical order and ignores non-.conf files" {
+    const allocator = testing.allocator;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    const original_environ = try test_util.setStdCEnviron(&[1][]const u8{
+        "OTEL_INJECTOR_CONFIG_DIR=unit-test-assets/config/conf.d",
+    });
+    defer test_util.resetStdCEnviron(original_environ);
+
+    var configuration = try createDefaultConfiguration(arena_allocator);
+    readConfigurationDirectory(arena_allocator, &configuration);
+
+    // 01-java.conf sets the JVM path
+    try testing.expectEqualStrings(
+        "/conf.d/path/to/jvm/javaagent.jar",
+        configuration.jvm_auto_instrumentation_agent_path,
+    );
+    // 02-nodejs.conf sets the Node.js path
+    try testing.expectEqualStrings(
+        "/conf.d/path/to/nodejs/register.js",
+        configuration.nodejs_auto_instrumentation_agent_path,
+    );
+    // not-a-conf-file.txt should be ignored, so the dotnet path should remain at the default.
+    try testing.expectEqualStrings(
+        default_dotnet_auto_instrumentation_agent_path_prefix,
+        configuration.dotnet_auto_instrumentation_agent_path_prefix,
+    );
+}
+
+test "readConfigurationDirectory: conf.d files override values from the main configuration file" {
+    const allocator = testing.allocator;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    const original_environ = try test_util.setStdCEnviron(&[1][]const u8{
+        "OTEL_INJECTOR_CONFIG_DIR=unit-test-assets/config/conf.d",
+    });
+    defer test_util.resetStdCEnviron(original_environ);
+
+    // First set a JVM path from the main config, then apply conf.d which should override it.
+    var configuration = try createDefaultConfiguration(arena_allocator);
+    configuration.jvm_auto_instrumentation_agent_path = @constCast("/original/jvm/path.jar");
+    readConfigurationDirectory(arena_allocator, &configuration);
+
+    try testing.expectEqualStrings(
+        "/conf.d/path/to/jvm/javaagent.jar",
+        configuration.jvm_auto_instrumentation_agent_path,
+    );
+}
+
+fn copyMap(allocator: std.mem.Allocator, source: std.StringHashMap([]u8)) !std.StringHashMap([]u8) {
+    var target = std.StringHashMap([]u8).init(allocator);
+    try target.ensureTotalCapacity(source.count());
+    var it = source.iterator();
+    while (it.next()) |entry| {
+        const key = try std.fmt.allocPrint(allocator, "{s}", .{entry.key_ptr.*});
+        const value = try std.fmt.allocPrint(allocator, "{s}", .{entry.value_ptr.*});
+        try target.put(key, value);
+    }
+    return target;
+}
+
+fn copyStringArray(allocator: std.mem.Allocator, source: [][]const u8) std.mem.Allocator.Error![][]const u8 {
+    const target = try allocator.alloc([]const u8, source.len);
+    for (source, 0..) |p, i| {
+        target[i] = try std.fmt.allocPrint(allocator, "{s}", .{p});
+    }
+    return target;
+}
+
+fn deinitStringArray(allocator: std.mem.Allocator, array: [][]const u8) void {
+    for (array) |item| {
+        allocator.free(item);
+    }
+    allocator.free(array);
+}

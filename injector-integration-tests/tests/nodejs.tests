@@ -1,0 +1,96 @@
+# Copyright The OpenTelemetry Authors
+# SPDX-License-Identifier: Apache-2.0
+
+run_test_case \
+  "injects NODE_OPTIONS if it is not present" \
+  "app" \
+  "node index.js node-options" \
+  "NODE_OPTIONS: --require /usr/lib/opentelemetry/nodejs/node_modules/@opentelemetry/auto-instrumentations-node/build/src/register.js"
+run_test_case \
+  "ask for NODE_OPTIONS (unset) twice" \
+  "app" \
+  "node index.js node-options-twice" \
+  "NODE_OPTIONS: --require /usr/lib/opentelemetry/nodejs/node_modules/@opentelemetry/auto-instrumentations-node/build/src/register.js; NODE_OPTIONS: --require /usr/lib/opentelemetry/nodejs/node_modules/@opentelemetry/auto-instrumentations-node/build/src/register.js"
+run_test_case \
+  "prepends to NODE_OPTIONS if it is present" \
+  "app" \
+  "node index.js node-options" \
+  "NODE_OPTIONS: --require /usr/lib/opentelemetry/nodejs/node_modules/@opentelemetry/auto-instrumentations-node/build/src/register.js --no-deprecation" \
+  "NODE_OPTIONS=--no-deprecation"
+run_test_case \
+  "ask for NODE_OPTIONS (set) twice" \
+  "app" \
+  "node index.js node-options-twice" \
+  "NODE_OPTIONS: --require /usr/lib/opentelemetry/nodejs/node_modules/@opentelemetry/auto-instrumentations-node/build/src/register.js --no-deprecation; NODE_OPTIONS: --require /usr/lib/opentelemetry/nodejs/node_modules/@opentelemetry/auto-instrumentations-node/build/src/register.js --no-deprecation" \
+  "NODE_OPTIONS=--no-deprecation"
+
+run_test_case \
+  "injects the Node.js auto-instrumentation agent" \
+  "app" \
+  "node index.js verify-auto-instrumentation-agent-has-been-injected" \
+  "otel_injector_nodejs_no_op_agent_has_been_loaded: true"
+
+# For test cases with the "default configuration file" substring in their label, run-tests-within-container.sh
+# will provide a configuration file in the default location (/etc/opentelemetry/injector/injector.conf).
+run_test_case \
+  "uses NODE_OPTIONS path from the default configuration file" \
+  "app" \
+  "node index.js node-options" \
+  "NODE_OPTIONS: --require /path/from/config-file/nodejs/node_modules/@opentelemetry/auto-instrumentations-node/build/src/register.js"
+run_test_case \
+  "the NODEJS_AUTO_INSTRUMENTATION_AGENT_PATH environment variable overrides the NODE_OPTIONS path from the default configuration file" \
+  "app" \
+  "node index.js node-options" \
+  "NODE_OPTIONS: --require /path/from/environment-variable/nodejs/node_modules/@opentelemetry/auto-instrumentations-node/build/src/register.js" \
+  "NODEJS_AUTO_INSTRUMENTATION_AGENT_PATH=/path/from/environment-variable/nodejs/node_modules/@opentelemetry/auto-instrumentations-node/build/src/register.js"
+
+run_test_case \
+  "uses NODE_OPTIONS path from the configuration file at a custom location" \
+  "app" \
+  "node index.js node-options" \
+  "NODE_OPTIONS: --require /path/from/config-file-custom-location/nodejs/node_modules/@opentelemetry/auto-instrumentations-node/build/src/register.js" \
+  "OTEL_INJECTOR_CONFIG_FILE=/custom/config/path/injector.conf"
+run_test_case \
+  "the NODEJS_AUTO_INSTRUMENTATION_AGENT_PATH environment variable overrides the NODE_OPTIONS path from the configuration file at a custom location" \
+  "app" \
+  "node index.js node-options" \
+  "NODE_OPTIONS: --require /path/from/environment-variable/nodejs/node_modules/@opentelemetry/auto-instrumentations-node/build/src/register.js" \
+  "OTEL_INJECTOR_CONFIG_FILE=/custom/config/path/injector.conf NODEJS_AUTO_INSTRUMENTATION_AGENT_PATH=/path/from/environment-variable/nodejs/node_modules/@opentelemetry/auto-instrumentations-node/build/src/register.js"
+
+run_test_case \
+  "setting OTEL_INJECTOR_AUTO_INSTRUMENTATION_DISABLED=nodejs disables the Node.js auto-instrumentation" \
+  "app" \
+  "node index.js node-options" \
+  "NODE_OPTIONS: -" \
+  "OTEL_INJECTOR_AUTO_INSTRUMENTATION_DISABLED=nodejs"
+run_test_case \
+  "setting OTEL_INJECTOR_AUTO_INSTRUMENTATION_DISABLED=* disables the Node.js auto-instrumentation" \
+  "app" \
+  "node index.js node-options" \
+  "NODE_OPTIONS: -" \
+  "OTEL_INJECTOR_AUTO_INSTRUMENTATION_DISABLED=*"
+run_test_case \
+  "setting NODEJS_AUTO_INSTRUMENTATION_AGENT_PATH to the empty string disables the Node.js auto-instrumentation" \
+  "app" \
+  "node index.js node-options" \
+  "NODE_OPTIONS: -" \
+  "NODEJS_AUTO_INSTRUMENTATION_AGENT_PATH="
+
+run_test_case \
+  "OTEL_ custom env var is returned according to the env file provided" \
+  "app" \
+  "node index.js custom-env-var OTEL_SDK_DISABLED" \
+  "OTEL_SDK_DISABLED: true"
+
+run_test_case \
+  "non OTEL_ custom env var is ignored" \
+  "app" \
+  "node index.js custom-env-var CUSTOM_ENV_VAR" \
+  "CUSTOM_ENV_VAR: -"
+
+run_test_case \
+  "setting OTEL_INJECTOR_DISABLED to true string disables the Node.js auto-instrumentation" \
+  "app" \
+  "node index.js node-options" \
+  "NODE_OPTIONS: -" \
+  "OTEL_INJECTOR_DISABLED=TRUE OTEL_INJECTOR_LOG_LEVEL=info"

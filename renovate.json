@@ -1,0 +1,38 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:best-practices",
+    "helpers:pinGitHubActionDigestsToSemver",
+    "schedule:weekly"
+  ],
+  "ignorePaths": [
+    "injector-integration-tests/**/Dockerfile*"
+  ],
+  "packageRules": [
+    {
+      "groupName": "all",
+      "matchUpdateTypes": ["minor", "major", "patch"],
+      "schedule": ["before 8am on Monday"]
+    },
+    {
+      "groupName": "Dockerfile",
+      "matchManagers": ["dockerfile"],
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "schedule": ["before 8am on Monday"]
+    },
+    {
+      "matchManagers": ["dockerfile"],
+      "matchUpdateTypes": ["major"],
+      "dependencyDashboardApproval": true
+    },
+    {
+      "groupName": "GitHub Actions",
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["minor", "major", "patch", "digest"],
+      "schedule": ["before 8am on Monday"]
+    }
+  ],
+  "labels": [
+    "dependencies"
+  ]
+}

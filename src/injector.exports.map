@@ -1,0 +1,5 @@
+{
+    # Deliberately not declaring a "global:" section, we do not export any symbols.
+    local:
+        *;
+};

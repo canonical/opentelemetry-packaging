@@ -1,0 +1,36 @@
+# Copyright The OpenTelemetry Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# DOTNET_STARTUP_HOOKS
+run_test_case \
+  "does not add DOTNET_STARTUP_HOOKS if it the .NET auto-instrumentation is present but cannot be accessed" \
+  "app" \
+  "node index.js dotnet-startup-hooks" \
+  "DOTNET_STARTUP_HOOKS: -"
+
+# JAVA_TOOL_OPTIONS
+run_test_case \
+  "does not add JAVA_TOOL_OPTIONS if it the Java auto-instrumentation is present but cannot be accessed" \
+  "app" \
+  "node index.js java-tool-options" \
+  "JAVA_TOOL_OPTIONS: -"
+
+# NODE_OPTIONS
+run_test_case \
+  "does not add NODE_OPTIONS if it the Node.js auto-instrumentation is present but cannot be accessed" \
+  "app" \
+  "node index.js node-options" \
+  "NODE_OPTIONS: -"
+
+# RUBYOPT / OTEL_RUBY_ADDITIONAL_GEM_PATH -- both env vars share a gate on the entry file, so a
+# permission-denied access() must leave both unmodified.
+run_test_case \
+  "does not add RUBYOPT if the Ruby auto-instrumentation is present but cannot be accessed" \
+  "app" \
+  "node index.js rubyopt" \
+  "RUBYOPT: -"
+run_test_case \
+  "does not add OTEL_RUBY_ADDITIONAL_GEM_PATH if the Ruby auto-instrumentation is present but cannot be accessed" \
+  "app" \
+  "node index.js otel-ruby-additional-gem-path" \
+  "OTEL_RUBY_ADDITIONAL_GEM_PATH: -"

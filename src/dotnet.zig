@@ -1,0 +1,1114 @@
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
+
+const builtin = @import("builtin");
+const std = @import("std");
+
+const args_parser = @import("args_parser.zig");
+const config = @import("config.zig");
+const libc = @import("libc.zig");
+const print = @import("print.zig");
+const test_util = @import("test_util.zig");
+const types = @import("types.zig");
+
+const testing = std.testing;
+
+pub const DotnetValues = struct {
+    coreclr_enable_profiling: [:0]const u8,
+    coreclr_profiler: [:0]const u8,
+    coreclr_profiler_path: [:0]u8,
+    additional_deps: ?[:0]u8,
+    shared_store: ?[:0]u8,
+    startup_hooks: [:0]u8,
+    otel_auto_home: [:0]u8,
+
+    pub fn freeAll(self: DotnetValues, allocator: std.mem.Allocator) void {
+        allocator.free(self.coreclr_profiler_path);
+        if (self.additional_deps) |ad| allocator.free(ad);
+        if (self.shared_store) |ss| allocator.free(ss);
+        allocator.free(self.startup_hooks);
+        allocator.free(self.otel_auto_home);
+    }
+};
+
+const coreclr_enable_profiling_value = "1";
+// See https://opentelemetry.io/docs/zero-code/dotnet/configuration/#net-clr-profiler.
+const coreclr_profiler_value = "{918728DD-259F-4A6A-AC2B-B85E1B658318}";
+const dotnet_host_name = "dotnet";
+const max_dotnet_metadata_file_size = 1024 * 1024;
+const opentelemetry_dependency_prefix = "OpenTelemetry";
+
+pub const CachedDotnetValues = struct {
+    values: ?DotnetValues,
+    done: bool,
+};
+
+const DotnetError = error{
+    UnknownLibCFlavor,
+    OutOfMemory,
+};
+
+const DotnetMetadataPaths = struct {
+    deps_path: []u8,
+    runtimeconfig_path: []u8,
+
+    fn freeAll(self: DotnetMetadataPaths, allocator: std.mem.Allocator) void {
+        allocator.free(self.deps_path);
+        allocator.free(self.runtimeconfig_path);
+    }
+};
+
+pub const coreclr_enable_profiling_env_var_name = "CORECLR_ENABLE_PROFILING";
+pub const coreclr_profiler_env_var_name = "CORECLR_PROFILER";
+pub const coreclr_profiler_path_env_var_name = "CORECLR_PROFILER_PATH";
+pub const dotnet_additional_deps_env_var_name = "DOTNET_ADDITIONAL_DEPS";
+pub const dotnet_shared_store_env_var_name = "DOTNET_SHARED_STORE";
+pub const dotnet_startup_hooks_env_var_name = "DOTNET_STARTUP_HOOKS";
+pub const otel_dotnet_auto_home_env_var_name = "OTEL_DOTNET_AUTO_HOME";
+
+const conflicting_dotnet_env_var_names = [_][:0]const u8{
+    coreclr_enable_profiling_env_var_name,
+    coreclr_profiler_env_var_name,
+    coreclr_profiler_path_env_var_name,
+    dotnet_additional_deps_env_var_name,
+    dotnet_shared_store_env_var_name,
+    dotnet_startup_hooks_env_var_name,
+};
+
+// We usually do not cache any values for environment variable modifications (i.e. we do not cache the modified
+// NODE_OPTIONS value or the modified OTEL_RESOURCE_ATTRIBUTES) because we are only called once, on startup via
+// root.zig#initEnviron. For .NET we deviate from this pattern a bit - we calculate all .NET-related environment
+// variables once based on CPU architecture and libc flavor, and then call getDotnetValues multiple times from
+// root.zig#initEnviron for eaech .NET-related env var. This is simply because .NET requires multiple environment
+// variables to be set.
+var cached_dotnet_values = CachedDotnetValues{
+    .values = null,
+    .done = false,
+};
+var libc_info: ?types.LibCInfo = null;
+
+pub fn setLibcInfo(info: types.LibCInfo) void {
+    libc_info = info;
+}
+
+/// Returns the values for .NET-profiler related environment variables.
+///
+/// The caller is responsible for freeing the returned strings (unless the results are passed on to setenv and need to
+/// stay in memory).
+pub fn getDotnetValues(
+    gpa: std.mem.Allocator,
+    configuration: config.InjectorConfiguration,
+) ?DotnetValues {
+    return doGetDotnetValues(
+        gpa,
+        configuration.dotnet_auto_instrumentation_agent_path_prefix,
+        configuration.dotnet_instrumentation_disabled,
+        configuration.dotnet_auto_instrumentation_minimum_dotnet_major_version,
+    );
+}
+
+fn doGetDotnetValues(
+    gpa: std.mem.Allocator,
+    dotnet_path_prefix: []u8,
+    dotnet_instrumentation_disabled: bool,
+    minimum_dotnet_major_version: u32,
+) ?DotnetValues {
+    if (dotnet_instrumentation_disabled or dotnet_path_prefix.len == 0) {
+        print.printInfo("Skipping the injection of the .NET OpenTelemetry instrumentation because it has been explicitly disabled.", .{});
+        return null;
+    }
+
+    if (libc_info == null) {
+        print.printError("invariant violated: libc info has not been set prior to calling getDotnetValues().", .{});
+        return null;
+    }
+    if (libc_info.?.flavor == .UNKNOWN) {
+        print.printError("Cannot determine libc flavor", .{});
+        return null;
+    }
+
+    if (cached_dotnet_values.done) {
+        return cached_dotnet_values.values;
+    }
+
+    if (!shouldInjectDotnet(gpa, minimum_dotnet_major_version)) {
+        cached_dotnet_values = .{
+            .values = null,
+            .done = true,
+        };
+        return null;
+    }
+
+    if (libc_info) |info| {
+        var dotnet_values = determineDotnetValues(
+            gpa,
+            dotnet_path_prefix,
+            info.flavor,
+            builtin.cpu.arch,
+        ) catch |err| {
+            print.printError("Cannot determine .NET environment variables: {}", .{err});
+            cached_dotnet_values = .{
+                .values = null,
+                // do not try to determine the .NET values again
+                .done = true,
+            };
+            return null;
+        };
+
+        const paths_to_check = [_][:0]const u8{
+            dotnet_values.coreclr_profiler_path,
+            dotnet_values.otel_auto_home,
+            dotnet_values.startup_hooks,
+        };
+        for (paths_to_check) |p| {
+            std.fs.cwd().access(p, .{}) catch |err| {
+                print.printError("Skipping injection of the .NET OpenTelemetry instrumentation because of an issue accessing {s}: {}", .{ p, err });
+                cached_dotnet_values = .{
+                    .values = null,
+                    // do not try to determine the .NET values again
+                    .done = true,
+                };
+                // free strings allocated in determineDotnetValues
+                dotnet_values.freeAll(gpa);
+                return null;
+            };
+        }
+
+        // DOTNET_ADDITIONAL_DEPS is optional: only add the env var if the additional deps directory exists, do not skip .NET
+        // injection if it does not exist.
+        if (dotnet_values.additional_deps) |additional_deps_path| {
+            std.fs.cwd().access(additional_deps_path, .{}) catch |err| {
+                print.printDebug("Not setting DOTNET_ADDITIONAL_DEPS because of an issue accessing {s}: {}", .{ additional_deps_path, err });
+                gpa.free(additional_deps_path);
+                dotnet_values.additional_deps = null;
+            };
+        }
+        // DOTNET_SHARED_STORE is optional: only add the env var if the additional deps directory exists, do not skip .NET
+        // injection if it does not exist.
+        if (dotnet_values.shared_store) |shared_store_path| {
+            std.fs.cwd().access(shared_store_path, .{}) catch |err| {
+                print.printDebug("Not setting DOTNET_SHARED_STORE because of an issue accessing {s}: {}", .{ shared_store_path, err });
+                gpa.free(shared_store_path);
+                dotnet_values.shared_store = null;
+            };
+        }
+
+        cached_dotnet_values = .{
+            .values = dotnet_values,
+            .done = true,
+        };
+        return dotnet_values;
+    }
+
+    unreachable;
+}
+
+fn shouldInjectDotnet(allocator: std.mem.Allocator, minimum_dotnet_major_version: u32) bool {
+    if (findConflictingPreExistingDotnetEnvVar()) |conflicting_env_var_name| {
+        print.printInfo(
+            "Skipping the injection of the .NET OpenTelemetry instrumentation because {s} is already set.",
+            .{conflicting_env_var_name},
+        );
+        return false;
+    }
+
+    const cmdline_args = args_parser.cmdLineForPID(allocator) catch |err| {
+        print.printDebug("Proceeding with the injection of the .NET OpenTelemetry instrumentation. Could not read the process command line: {}", .{err});
+        return true;
+    };
+    defer {
+        for (cmdline_args) |arg| allocator.free(arg);
+        allocator.free(cmdline_args);
+    }
+
+    const self_exe_path = std.fs.selfExePathAlloc(allocator) catch |err| {
+        print.printDebug("Proceeding with the injection of the .NET OpenTelemetry instrumentation. Could not resolve the executable path: {}", .{err});
+        return true;
+    };
+    defer allocator.free(self_exe_path);
+
+    const maybe_app_path = resolveManagedApplicationPath(allocator, cmdline_args, self_exe_path) catch |err| {
+        print.printDebug("Proceeding with the injection of the .NET OpenTelemetry instrumentation. Could not determine the managed application path: {}", .{err});
+        return true;
+    };
+    const app_path = maybe_app_path orelse {
+        print.printDebug("Proceeding with the injection of the .NET OpenTelemetry instrumentation. The process does not look like a recognized .NET application startup.", .{});
+        return true;
+    };
+    defer allocator.free(app_path);
+
+    const metadata_paths = createDotnetMetadataPaths(allocator, app_path) catch |err| {
+        print.printDebug("Proceeding with the injection of the .NET OpenTelemetry instrumentation. Could not determine the application metadata paths: {}", .{err});
+        return true;
+    };
+    defer metadata_paths.freeAll(allocator);
+
+    const runtimeconfig_content = readSmallTextFileAlloc(allocator, metadata_paths.runtimeconfig_path) catch |err| {
+        print.printDebug("Proceeding with the injection of the .NET OpenTelemetry instrumentation. Could not read {s}: {}", .{ metadata_paths.runtimeconfig_path, err });
+        return true;
+    };
+    defer allocator.free(runtimeconfig_content);
+
+    const runtimeconfig_targets_supported_dotnet = runtimeConfigTargetsSupportedDotnet(allocator, runtimeconfig_content, minimum_dotnet_major_version) catch |err| {
+        print.printDebug("Proceeding with the injection of the .NET OpenTelemetry instrumentation. Could not parse {s} safely: {}", .{ metadata_paths.runtimeconfig_path, err });
+        return true;
+    };
+    if (!runtimeconfig_targets_supported_dotnet) {
+        print.printInfo("Skipping the injection of the .NET OpenTelemetry instrumentation because {s} does not target a supported .NET runtime (minimum supported .NET major version: {d}).", .{ metadata_paths.runtimeconfig_path, minimum_dotnet_major_version });
+        return false;
+    }
+
+    const deps_content = readSmallTextFileAlloc(allocator, metadata_paths.deps_path) catch |err| {
+        print.printDebug("Proceeding with the injection of the .NET OpenTelemetry instrumentation. Could not read {s}: {}", .{ metadata_paths.deps_path, err });
+        return true;
+    };
+    defer allocator.free(deps_content);
+
+    if (depsJsonContainsOpenTelemetryDependency(allocator, deps_content)) |contains_opentelemetry| {
+        if (contains_opentelemetry) {
+            print.printInfo("Skipping the injection of the .NET OpenTelemetry instrumentation because {s} already references OpenTelemetry packages.", .{metadata_paths.deps_path});
+            return false;
+        }
+    } else |err| {
+        print.printDebug("Proceeding with the injection of the .NET OpenTelemetry instrumentation. Could not parse {s} safely: {}", .{ metadata_paths.deps_path, err });
+        return true;
+    }
+
+    return true;
+}
+
+fn findConflictingPreExistingDotnetEnvVar() ?[:0]const u8 {
+    const getenv_fn = libc_info.?.getenv_fn_ptr;
+    for (conflicting_dotnet_env_var_names) |env_var_name| {
+        if (getenv_fn(env_var_name) != null) {
+            return env_var_name;
+        }
+    }
+
+    return null;
+}
+
+fn resolveManagedApplicationPath(
+    allocator: std.mem.Allocator,
+    cmdline_args: []const []const u8,
+    self_exe_path: []const u8,
+) !?[]u8 {
+    if (cmdline_args.len == 0) {
+        return null;
+    }
+
+    if (std.mem.eql(u8, std.fs.path.basename(cmdline_args[0]), dotnet_host_name)) {
+        for (cmdline_args[1..]) |arg| {
+            if (arg.len == 0 or arg[0] == '-') {
+                continue;
+            }
+            if (std.mem.endsWith(u8, arg, ".dll") or std.mem.endsWith(u8, arg, ".exe")) {
+                return try allocator.dupe(u8, arg);
+            }
+        }
+        return null;
+    }
+
+    return try allocator.dupe(u8, self_exe_path);
+}
+
+fn createDotnetMetadataPaths(allocator: std.mem.Allocator, app_path: []const u8) !DotnetMetadataPaths {
+    const app_base_path =
+        if (std.mem.endsWith(u8, app_path, ".dll") or std.mem.endsWith(u8, app_path, ".exe"))
+            app_path[0 .. app_path.len - 4]
+        else
+            app_path;
+
+    return .{
+        .deps_path = try std.fmt.allocPrint(allocator, "{s}.deps.json", .{app_base_path}),
+        .runtimeconfig_path = try std.fmt.allocPrint(allocator, "{s}.runtimeconfig.json", .{app_base_path}),
+    };
+}
+
+fn readSmallTextFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const file =
+        if (std.fs.path.isAbsolute(path))
+            try std.fs.openFileAbsolute(path, .{})
+        else
+            try std.fs.cwd().openFile(path, .{});
+    defer file.close();
+
+    return file.readToEndAlloc(allocator, max_dotnet_metadata_file_size);
+}
+
+fn depsJsonContainsOpenTelemetryDependency(allocator: std.mem.Allocator, content: []const u8) !bool {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, content, .{});
+    defer parsed.deinit();
+
+    return jsonContainsOpenTelemetryDependency(parsed.value);
+}
+
+fn jsonContainsOpenTelemetryDependency(value: std.json.Value) bool {
+    switch (value) {
+        .object => |object| {
+            var iterator = object.iterator();
+            while (iterator.next()) |entry| {
+                if (jsonObjectKeyLooksLikeOpenTelemetryDependency(entry.key_ptr.*)) {
+                    return true;
+                }
+                if (jsonContainsOpenTelemetryDependency(entry.value_ptr.*)) {
+                    return true;
+                }
+            }
+            return false;
+        },
+        .array => |array| {
+            for (array.items) |item| {
+                if (jsonContainsOpenTelemetryDependency(item)) {
+                    return true;
+                }
+            }
+            return false;
+        },
+        else => return false,
+    }
+}
+
+fn jsonObjectKeyLooksLikeOpenTelemetryDependency(key: []const u8) bool {
+    const dependency_name =
+        if (std.mem.indexOfScalar(u8, key, '/')) |slash_index|
+            key[0..slash_index]
+        else
+            key;
+
+    return std.mem.startsWith(u8, dependency_name, opentelemetry_dependency_prefix);
+}
+
+fn runtimeConfigTargetsSupportedDotnet(allocator: std.mem.Allocator, content: []const u8, minimum_dotnet_major_version: u32) !bool {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, content, .{});
+    defer parsed.deinit();
+
+    const root = switch (parsed.value) {
+        .object => |obj| obj,
+        else => return true,
+    };
+
+    const runtime_options_value = root.get("runtimeOptions") orelse return true;
+    const runtime_options = switch (runtime_options_value) {
+        .object => |obj| obj,
+        else => return true,
+    };
+
+    const tfm = runtime_options.get("tfm") orelse return true;
+    const tfm_str = switch (tfm) {
+        .string => |str| str,
+        else => return true,
+    };
+
+    return tfmTargetsSupportedDotnet(tfm_str, minimum_dotnet_major_version);
+}
+
+fn tfmTargetsSupportedDotnet(tfm: []const u8, minimum_dotnet_major_version: u32) bool {
+    if (!std.mem.startsWith(u8, tfm, "net")) return false;
+
+    const rest = tfm[3..];
+
+    // We MUST find a dot to ensure it's a major.minor modern layout (e.g., net8.0)
+    // This immediately filters out legacy dotless TFMs like "net48" or "net472"
+    const dot_index = std.mem.indexOfScalar(u8, rest, '.') orelse return false;
+    if (dot_index == 0) return false;
+
+    // Extract just the major version up to the dot (e.g., "8" from "8.0-windows")
+    const major_str = rest[0..dot_index];
+    const major = std.fmt.parseUnsigned(u32, major_str, 10) catch return false;
+
+    return major >= minimum_dotnet_major_version;
+}
+
+test "doGetDotnetValues: should return null value if the libc flavor has not been set" {
+    const allocator = testing.allocator;
+    _resetState();
+    defer _resetState();
+
+    const path = try std.fmt.allocPrint(allocator, "", .{});
+    defer allocator.free(path);
+
+    // libc_info is null after _resetState()
+    const dotnet_values = doGetDotnetValues(allocator, path, false, 8);
+    try test_util.expectWithMessage(dotnet_values == null, "dotnet_values == null");
+}
+
+test "doGetDotnetValues: should return null value if dotnet_instrumentation_disabled is true" {
+    const allocator = testing.allocator;
+    _resetState();
+    defer _resetState();
+
+    const path = try std.fmt.allocPrint(allocator, "/some/valid/path", .{});
+    defer allocator.free(path);
+
+    libc_info = test_util.testLibcInfo(.GNU);
+    const dotnet_values = doGetDotnetValues(allocator, path, true, 8);
+    try test_util.expectWithMessage(dotnet_values == null, "dotnet_values == null");
+}
+
+test "doGetDotnetValues: should return null value if dotnet_path_prefix is the empty string" {
+    const allocator = testing.allocator;
+    _resetState();
+    defer _resetState();
+
+    const path = try std.fmt.allocPrint(allocator, "", .{});
+    defer allocator.free(path);
+
+    libc_info = test_util.testLibcInfo(.GNU);
+    const dotnet_values = doGetDotnetValues(allocator, path, false, 8);
+    try test_util.expectWithMessage(dotnet_values == null, "dotnet_values == null");
+}
+
+test "doGetDotnetValues: should return null value if the profiler path cannot be accessed" {
+    const allocator = testing.allocator;
+    _resetState();
+    defer _resetState();
+
+    const path = try std.fmt.allocPrintSentinel(allocator, "/invalid/path", .{}, 0);
+    defer allocator.free(path);
+
+    libc_info = test_util.testLibcInfo(.GNU);
+    const dotnet_values = doGetDotnetValues(allocator, path, false, 8);
+    try test_util.expectWithMessage(dotnet_values == null, "dotnet_values == null");
+}
+
+test "doGetDotnetValues: should return null value if conflicting .NET env var already exists" {
+    const allocator = testing.allocator;
+    _resetState();
+    defer _resetState();
+
+    const original_environ = try test_util.setStdCEnviron(&[1][]const u8{"CORECLR_PROFILER={existing-profiler-guid}"});
+    defer test_util.resetStdCEnviron(original_environ);
+
+    const path = try std.fmt.allocPrintSentinel(allocator, "/some/valid/path", .{}, 0);
+    defer allocator.free(path);
+
+    libc_info = test_util.testLibcInfo(.GNU);
+    const dotnet_values = doGetDotnetValues(allocator, path, false, 8);
+    try test_util.expectWithMessage(dotnet_values == null, "dotnet_values == null");
+}
+
+test "findConflictingPreExistingDotnetEnvVar: returns null when no conflicting .NET env var is set" {
+    const original_environ = try test_util.clearStdCEnviron();
+    defer test_util.resetStdCEnviron(original_environ);
+
+    libc_info = test_util.testLibcInfo(.GNU);
+    try test_util.expectWithMessage(findConflictingPreExistingDotnetEnvVar() == null, "conflicting env var should be null");
+}
+
+test "findConflictingPreExistingDotnetEnvVar: returns CORECLR_ENABLE_PROFILING when set" {
+    const original_environ = try test_util.setStdCEnviron(&[1][]const u8{"CORECLR_ENABLE_PROFILING=1"});
+    defer test_util.resetStdCEnviron(original_environ);
+
+    libc_info = test_util.testLibcInfo(.GNU);
+    try testing.expectEqualStrings(coreclr_enable_profiling_env_var_name, findConflictingPreExistingDotnetEnvVar() orelse return error.Unexpected);
+}
+
+test "findConflictingPreExistingDotnetEnvVar: returns CORECLR_PROFILER when set" {
+    const original_environ = try test_util.setStdCEnviron(&[1][]const u8{"CORECLR_PROFILER={existing-profiler-guid}"});
+    defer test_util.resetStdCEnviron(original_environ);
+
+    libc_info = test_util.testLibcInfo(.GNU);
+    try testing.expectEqualStrings(coreclr_profiler_env_var_name, findConflictingPreExistingDotnetEnvVar() orelse return error.Unexpected);
+}
+
+test "findConflictingPreExistingDotnetEnvVar: returns CORECLR_PROFILER_PATH when set" {
+    const original_environ = try test_util.setStdCEnviron(&[1][]const u8{"CORECLR_PROFILER_PATH=/tmp/existing-profiler.so"});
+    defer test_util.resetStdCEnviron(original_environ);
+
+    libc_info = test_util.testLibcInfo(.GNU);
+    try testing.expectEqualStrings(coreclr_profiler_path_env_var_name, findConflictingPreExistingDotnetEnvVar() orelse return error.Unexpected);
+}
+
+test "findConflictingPreExistingDotnetEnvVar: returns DOTNET_ADDITIONAL_DEPS when set" {
+    const original_environ = try test_util.setStdCEnviron(&[1][]const u8{"DOTNET_ADDITIONAL_DEPS=/tmp/existing-additional-deps"});
+    defer test_util.resetStdCEnviron(original_environ);
+
+    libc_info = test_util.testLibcInfo(.GNU);
+    try testing.expectEqualStrings(dotnet_additional_deps_env_var_name, findConflictingPreExistingDotnetEnvVar() orelse return error.Unexpected);
+}
+
+test "findConflictingPreExistingDotnetEnvVar: returns DOTNET_SHARED_STORE when set" {
+    const original_environ = try test_util.setStdCEnviron(&[1][]const u8{"DOTNET_SHARED_STORE=/tmp/existing-shared-store"});
+    defer test_util.resetStdCEnviron(original_environ);
+
+    libc_info = test_util.testLibcInfo(.GNU);
+    try testing.expectEqualStrings(dotnet_shared_store_env_var_name, findConflictingPreExistingDotnetEnvVar() orelse return error.Unexpected);
+}
+
+test "findConflictingPreExistingDotnetEnvVar: returns DOTNET_STARTUP_HOOKS when set" {
+    const original_environ = try test_util.setStdCEnviron(&[1][]const u8{"DOTNET_STARTUP_HOOKS=/tmp/existing-startup-hook.dll"});
+    defer test_util.resetStdCEnviron(original_environ);
+
+    libc_info = test_util.testLibcInfo(.GNU);
+    try testing.expectEqualStrings(dotnet_startup_hooks_env_var_name, findConflictingPreExistingDotnetEnvVar() orelse return error.Unexpected);
+}
+
+test "findConflictingPreExistingDotnetEnvVar: ignores OTEL_DOTNET_AUTO_HOME on its own" {
+    const original_environ = try test_util.setStdCEnviron(&[1][]const u8{"OTEL_DOTNET_AUTO_HOME=/tmp/existing-otel-home"});
+    defer test_util.resetStdCEnviron(original_environ);
+
+    libc_info = test_util.testLibcInfo(.GNU);
+    try test_util.expectWithMessage(findConflictingPreExistingDotnetEnvVar() == null, "OTEL_DOTNET_AUTO_HOME should not be treated as conflicting");
+}
+
+test "resolveManagedApplicationPath: dotnet host uses managed assembly argument" {
+    const allocator = testing.allocator;
+
+    const cmdline_args = [_][]const u8{
+        "/usr/bin/dotnet",
+        "/app/MyApp.dll",
+        "--urls",
+        "http://localhost:8080",
+    };
+
+    const app_path = (try resolveManagedApplicationPath(allocator, &cmdline_args, "/usr/bin/dotnet")) orelse return error.Unexpected;
+    defer allocator.free(app_path);
+
+    try testing.expectEqualStrings("/app/MyApp.dll", app_path);
+}
+
+test "resolveManagedApplicationPath: direct apphost launch uses executable path" {
+    const allocator = testing.allocator;
+
+    const cmdline_args = [_][]const u8{
+        "/app/MyApp",
+        "--urls",
+        "http://localhost:8080",
+    };
+
+    const app_path = (try resolveManagedApplicationPath(allocator, &cmdline_args, "/app/MyApp")) orelse return error.Unexpected;
+    defer allocator.free(app_path);
+
+    try testing.expectEqualStrings("/app/MyApp", app_path);
+}
+
+test "resolveManagedApplicationPath: dotnet host without managed assembly returns null" {
+    const cmdline_args = [_][]const u8{
+        "/usr/bin/dotnet",
+        "--info",
+    };
+
+    try test_util.expectWithMessage((try resolveManagedApplicationPath(testing.allocator, &cmdline_args, "/usr/bin/dotnet")) == null, "app path should be null");
+}
+
+test "createDotnetMetadataPaths: managed dll path produces deps path" {
+    const allocator = testing.allocator;
+
+    const metadata_paths = try createDotnetMetadataPaths(allocator, "/app/MyApp.dll");
+    defer metadata_paths.freeAll(allocator);
+
+    try testing.expectEqualStrings("/app/MyApp.deps.json", metadata_paths.deps_path);
+    try testing.expectEqualStrings("/app/MyApp.runtimeconfig.json", metadata_paths.runtimeconfig_path);
+}
+
+test "createDotnetMetadataPaths: managed exe path produces runtimeconfig path" {
+    const allocator = testing.allocator;
+
+    const metadata_paths = try createDotnetMetadataPaths(allocator, "/app/MyApp.exe");
+    defer metadata_paths.freeAll(allocator);
+
+    try testing.expectEqualStrings("/app/MyApp.deps.json", metadata_paths.deps_path);
+    try testing.expectEqualStrings("/app/MyApp.runtimeconfig.json", metadata_paths.runtimeconfig_path);
+}
+
+test "createDotnetMetadataPaths: apphost path produces deps path" {
+    const allocator = testing.allocator;
+
+    const metadata_paths = try createDotnetMetadataPaths(allocator, "/app/MyApp");
+    defer metadata_paths.freeAll(allocator);
+
+    try testing.expectEqualStrings("/app/MyApp.deps.json", metadata_paths.deps_path);
+    try testing.expectEqualStrings("/app/MyApp.runtimeconfig.json", metadata_paths.runtimeconfig_path);
+}
+
+test "runtimeConfigTargetsSupportedDotnet: true for net8.0 Microsoft.NETCore.App" {
+    const content =
+        \\{
+        \\  "runtimeOptions": {
+        \\    "tfm": "net8.0",
+        \\    "framework": {
+        \\      "name": "Microsoft.NETCore.App",
+        \\      "version": "8.0.0"
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    try test_util.expectWithMessage(try runtimeConfigTargetsSupportedDotnet(testing.allocator, content, 8), "runtimeconfig should qualify");
+}
+
+test "runtimeConfigTargetsSupportedDotnet: true for ASP.NET Core runtimeconfig" {
+    const content =
+        \\{
+        \\  "runtimeOptions": {
+        \\    "tfm": "net8.0",
+        \\    "framework": {
+        \\      "name": "Microsoft.AspNetCore.App",
+        \\      "version": "8.0.1"
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    try test_util.expectWithMessage(try runtimeConfigTargetsSupportedDotnet(testing.allocator, content, 8), "runtimeconfig should qualify");
+}
+
+test "runtimeConfigTargetsSupportedDotnet: false for net7.0 runtimeconfig" {
+    const content =
+        \\{
+        \\  "runtimeOptions": {
+        \\    "tfm": "net7.0",
+        \\    "framework": {
+        \\      "name": "Microsoft.NETCore.App",
+        \\      "version": "7.0.0"
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    try test_util.expectWithMessage(!(try runtimeConfigTargetsSupportedDotnet(testing.allocator, content, 8)), "runtimeconfig should not qualify");
+}
+
+test "runtimeConfigTargetsSupportedDotnet: false for net6.0 runtimeconfig with the default minimum major version" {
+    const content =
+        \\{
+        \\  "runtimeOptions": {
+        \\    "tfm": "net6.0",
+        \\    "framework": {
+        \\      "name": "Microsoft.NETCore.App",
+        \\      "version": "6.0.0"
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    try test_util.expectWithMessage(!(try runtimeConfigTargetsSupportedDotnet(testing.allocator, content, 8)), "runtimeconfig should not qualify");
+}
+
+test "runtimeConfigTargetsSupportedDotnet: true for net6.0 runtimeconfig when the minimum major version is lowered to 6" {
+    const content =
+        \\{
+        \\  "runtimeOptions": {
+        \\    "tfm": "net6.0",
+        \\    "framework": {
+        \\      "name": "Microsoft.NETCore.App",
+        \\      "version": "6.0.36"
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    try test_util.expectWithMessage(try runtimeConfigTargetsSupportedDotnet(testing.allocator, content, 6), "runtimeconfig should qualify");
+}
+
+test "tfmTargetsSupportedDotnet: respects the configured minimum major version" {
+    try test_util.expectWithMessage(tfmTargetsSupportedDotnet("net8.0", 8), "net8.0 should qualify with minimum 8");
+    try test_util.expectWithMessage(!tfmTargetsSupportedDotnet("net6.0", 8), "net6.0 should not qualify with minimum 8");
+    try test_util.expectWithMessage(tfmTargetsSupportedDotnet("net6.0", 6), "net6.0 should qualify with minimum 6");
+    try test_util.expectWithMessage(tfmTargetsSupportedDotnet("net8.0", 6), "net8.0 should qualify with minimum 6");
+    try test_util.expectWithMessage(!tfmTargetsSupportedDotnet("net5.0", 6), "net5.0 should not qualify with minimum 6");
+    try test_util.expectWithMessage(!tfmTargetsSupportedDotnet("net472", 6), "legacy dotless TFMs should never qualify");
+}
+
+test "runtimeConfigTargetsSupportedDotnet: true for incomplete runtimeconfig" {
+    const content =
+        \\{
+        \\  "runtimeOptions": {
+        \\    "rollForward": "Major"
+        \\  }
+        \\}
+    ;
+
+    try test_util.expectWithMessage(try runtimeConfigTargetsSupportedDotnet(testing.allocator, content, 8), "runtimeconfig with no tfm should proceed with injection");
+}
+
+test "runtimeConfigTargetsSupportedDotnet: rejects malformed json" {
+    try testing.expectError(error.UnexpectedEndOfInput, runtimeConfigTargetsSupportedDotnet(testing.allocator, "{", 8));
+}
+
+test "runtimeConfigTargetsSupportedDotnet: true for net9.0 Microsoft.NETCore.App" {
+    const content =
+        \\{
+        \\  "runtimeOptions": {
+        \\    "tfm": "net9.0",
+        \\    "framework": {
+        \\      "name": "Microsoft.NETCore.App",
+        \\      "version": "9.0.0"
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    try test_util.expectWithMessage(try runtimeConfigTargetsSupportedDotnet(testing.allocator, content, 8), "runtimeconfig should qualify");
+}
+
+test "runtimeConfigTargetsSupportedDotnet: true for net11.0 future multi-digit major" {
+    const content =
+        \\{
+        \\  "runtimeOptions": {
+        \\    "tfm": "net11.0",
+        \\    "framework": {
+        \\      "name": "Microsoft.NETCore.App",
+        \\      "version": "11.0.0"
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    try test_util.expectWithMessage(try runtimeConfigTargetsSupportedDotnet(testing.allocator, content, 8), "runtimeconfig should qualify");
+}
+
+test "runtimeConfigTargetsSupportedDotnet: true for OS-specific TFM net8.0-windows" {
+    const content =
+        \\{
+        \\  "runtimeOptions": {
+        \\    "tfm": "net8.0-windows",
+        \\    "framework": {
+        \\      "name": "Microsoft.NETCore.App",
+        \\      "version": "8.0.0"
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    try test_util.expectWithMessage(try runtimeConfigTargetsSupportedDotnet(testing.allocator, content, 8), "runtimeconfig should qualify");
+}
+
+test "depsJsonContainsOpenTelemetryDependency: false when no OpenTelemetry packages are present" {
+    const content =
+        \\{
+        \\  "libraries": {
+        \\    "Newtonsoft.Json/13.0.3": {
+        \\      "type": "package"
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    try test_util.expectWithMessage(!(try depsJsonContainsOpenTelemetryDependency(testing.allocator, content)), "deps should not contain OpenTelemetry");
+}
+
+test "depsJsonContainsOpenTelemetryDependency: true when OpenTelemetry package is present" {
+    const content =
+        \\{
+        \\  "libraries": {
+        \\    "OpenTelemetry/1.11.0": {
+        \\      "type": "package"
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    try test_util.expectWithMessage(try depsJsonContainsOpenTelemetryDependency(testing.allocator, content), "deps should contain OpenTelemetry");
+}
+
+test "depsJsonContainsOpenTelemetryDependency: true when OpenTelemetry target entry is present" {
+    const content =
+        \\{
+        \\  "targets": {
+        \\    ".NETCoreApp,Version=v9.0": {
+        \\      "OpenTelemetry.Extensions.Hosting/1.11.0": {
+        \\        "runtime": {}
+        \\      }
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    try test_util.expectWithMessage(try depsJsonContainsOpenTelemetryDependency(testing.allocator, content), "deps should contain OpenTelemetry");
+}
+
+test "depsJsonContainsOpenTelemetryDependency: rejects malformed json" {
+    try testing.expectError(error.UnexpectedEndOfInput, depsJsonContainsOpenTelemetryDependency(testing.allocator, "{"));
+}
+
+fn determineDotnetValues(
+    gpa: std.mem.Allocator,
+    dotnet_path_prefix: []u8,
+    libc_f: types.LibCFlavor,
+    architecture: std.Target.Cpu.Arch,
+) DotnetError!DotnetValues {
+    const libc_flavor_prefix: []const u8 =
+        switch (libc_f) {
+            .GNU => "glibc",
+            .MUSL => "musl",
+            else => return error.UnknownLibCFlavor,
+        };
+
+    // Map known architectures to their .NET RID names; for everything else fall
+    // through to Zig's tag name so that downstream adopters can place their SDK at
+    // the expected path without the injector hard-blocking unknown architectures.
+    const arch_dotnet_name: []const u8 = switch (architecture) {
+        .x86_64 => "x64",
+        .aarch64 => "arm64",
+        else => |arch| @tagName(arch),
+    };
+    const platform = switch (libc_f) {
+        .GNU => try std.fmt.allocPrint(gpa, "linux-{s}", .{arch_dotnet_name}),
+        .MUSL => try std.fmt.allocPrint(gpa, "linux-musl-{s}", .{arch_dotnet_name}),
+        else => return error.UnknownLibCFlavor,
+    };
+    defer gpa.free(platform);
+
+    const coreclr_profiler_path = try std.fmt.allocPrintSentinel(gpa, "{s}/{s}/{s}/OpenTelemetry.AutoInstrumentation.Native.so", .{
+        dotnet_path_prefix, libc_flavor_prefix, platform,
+    }, 0);
+
+    const additional_deps = try std.fmt.allocPrintSentinel(gpa, "{s}/{s}/AdditionalDeps", .{
+        dotnet_path_prefix, libc_flavor_prefix,
+    }, 0);
+
+    const otel_auto_home = try std.fmt.allocPrintSentinel(gpa, "{s}/{s}", .{ dotnet_path_prefix, libc_flavor_prefix }, 0);
+
+    const shared_store = try std.fmt.allocPrintSentinel(gpa, "{s}/{s}/store", .{
+        dotnet_path_prefix, libc_flavor_prefix,
+    }, 0);
+
+    const startup_hooks = try std.fmt.allocPrintSentinel(gpa, "{s}/{s}/net/OpenTelemetry.AutoInstrumentation.StartupHook.dll", .{
+        dotnet_path_prefix, libc_flavor_prefix,
+    }, 0);
+
+    return .{
+        .coreclr_enable_profiling = coreclr_enable_profiling_value,
+        .coreclr_profiler = coreclr_profiler_value,
+        .coreclr_profiler_path = coreclr_profiler_path,
+        .additional_deps = additional_deps,
+        .otel_auto_home = otel_auto_home,
+        .shared_store = shared_store,
+        .startup_hooks = startup_hooks,
+    };
+}
+
+test "determineDotnetValues: returns values for glibc/s390x using Zig arch tag name" {
+    const allocator = testing.allocator;
+    const path = try std.fmt.allocPrint(allocator, "/usr/lib/opentelemetry/dotnet", .{});
+    defer allocator.free(path);
+
+    const dotnet_values = try determineDotnetValues(allocator, path, .GNU, .s390x);
+    defer dotnet_values.freeAll(allocator);
+
+    try testing.expectEqualStrings(
+        "/usr/lib/opentelemetry/dotnet/glibc/linux-s390x/OpenTelemetry.AutoInstrumentation.Native.so",
+        dotnet_values.coreclr_profiler_path,
+    );
+    try testing.expectEqualStrings(
+        "/usr/lib/opentelemetry/dotnet/glibc",
+        dotnet_values.otel_auto_home,
+    );
+}
+
+test "determineDotnetValues: returns values for musl/s390x using Zig arch tag name" {
+    const allocator = testing.allocator;
+    const path = try std.fmt.allocPrint(allocator, "/usr/lib/opentelemetry/dotnet", .{});
+    defer allocator.free(path);
+
+    const dotnet_values = try determineDotnetValues(allocator, path, .MUSL, .s390x);
+    defer dotnet_values.freeAll(allocator);
+
+    try testing.expectEqualStrings(
+        "/usr/lib/opentelemetry/dotnet/musl/linux-musl-s390x/OpenTelemetry.AutoInstrumentation.Native.so",
+        dotnet_values.coreclr_profiler_path,
+    );
+    try testing.expectEqualStrings(
+        "/usr/lib/opentelemetry/dotnet/musl",
+        dotnet_values.otel_auto_home,
+    );
+}
+
+test "determineDotnetValues: should return error for unknown libc flavor" {
+    try testing.expectError(error.UnknownLibCFlavor, determineDotnetValues(
+        testing.allocator,
+        "",
+        .UNKNOWN,
+        .x86_64,
+    ));
+}
+
+test "determineDotnetValues: should return values for glibc/x86_64" {
+    const allocator = testing.allocator;
+    const path = try std.fmt.allocPrint(allocator, "/usr/lib/opentelemetry/dotnet", .{});
+    defer allocator.free(path);
+
+    const dotnet_values =
+        try determineDotnetValues(
+            allocator,
+            path,
+            .GNU,
+            .x86_64,
+        );
+    defer dotnet_values.freeAll(allocator);
+
+    try testing.expectEqualStrings(
+        coreclr_enable_profiling_value,
+        dotnet_values.coreclr_enable_profiling,
+    );
+    try testing.expectEqualStrings(
+        coreclr_profiler_value,
+        dotnet_values.coreclr_profiler,
+    );
+    try testing.expectEqualStrings(
+        "/usr/lib/opentelemetry/dotnet/glibc/linux-x64/OpenTelemetry.AutoInstrumentation.Native.so",
+        dotnet_values.coreclr_profiler_path,
+    );
+    try testing.expectEqualStrings(
+        "/usr/lib/opentelemetry/dotnet/glibc/AdditionalDeps",
+        dotnet_values.additional_deps orelse return error.Unexpected,
+    );
+    try testing.expectEqualStrings(
+        "/usr/lib/opentelemetry/dotnet/glibc",
+        dotnet_values.otel_auto_home,
+    );
+    try testing.expectEqualStrings(
+        "/usr/lib/opentelemetry/dotnet/glibc/store",
+        dotnet_values.shared_store orelse return error.Unexpected,
+    );
+    try testing.expectEqualStrings(
+        "/usr/lib/opentelemetry/dotnet/glibc/net/OpenTelemetry.AutoInstrumentation.StartupHook.dll",
+        dotnet_values.startup_hooks,
+    );
+}
+
+test "determineDotnetValues: should return values for glibc/arm64" {
+    const allocator = testing.allocator;
+    const path =
+        try std.fmt.allocPrint(allocator, "/usr/lib/opentelemetry/dotnet", .{});
+    defer allocator.free(path);
+
+    const dotnet_values =
+        try determineDotnetValues(
+            allocator,
+            path,
+            .GNU,
+            .aarch64,
+        );
+    defer dotnet_values.freeAll(allocator);
+
+    try testing.expectEqualStrings(
+        coreclr_enable_profiling_value,
+        dotnet_values.coreclr_enable_profiling,
+    );
+    try testing.expectEqualStrings(
+        coreclr_profiler_value,
+        dotnet_values.coreclr_profiler,
+    );
+    try testing.expectEqualStrings(
+        "/usr/lib/opentelemetry/dotnet/glibc/linux-arm64/OpenTelemetry.AutoInstrumentation.Native.so",
+        dotnet_values.coreclr_profiler_path,
+    );
+    try testing.expectEqualStrings(
+        "/usr/lib/opentelemetry/dotnet/glibc/AdditionalDeps",
+        dotnet_values.additional_deps orelse return error.Unexpected,
+    );
+    try testing.expectEqualStrings(
+        "/usr/lib/opentelemetry/dotnet/glibc",
+        dotnet_values.otel_auto_home,
+    );
+    try testing.expectEqualStrings(
+        "/usr/lib/opentelemetry/dotnet/glibc/store",
+        dotnet_values.shared_store orelse return error.Unexpected,
+    );
+    try testing.expectEqualStrings(
+        "/usr/lib/opentelemetry/dotnet/glibc/net/OpenTelemetry.AutoInstrumentation.StartupHook.dll",
+        dotnet_values.startup_hooks,
+    );
+}
+
+test "determineDotnetValues: should return values for musl/x86_64" {
+    const allocator = testing.allocator;
+    const path =
+        try std.fmt.allocPrint(allocator, "/usr/lib/opentelemetry/dotnet", .{});
+    defer allocator.free(path);
+
+    const dotnet_values =
+        try determineDotnetValues(
+            allocator,
+            path,
+            .MUSL,
+            .x86_64,
+        );
+    defer dotnet_values.freeAll(allocator);
+
+    try testing.expectEqualStrings(
+        coreclr_enable_profiling_value,
+        dotnet_values.coreclr_enable_profiling,
+    );
+    try testing.expectEqualStrings(
+        coreclr_profiler_value,
+        dotnet_values.coreclr_profiler,
+    );
+    try testing.expectEqualStrings(
+        "/usr/lib/opentelemetry/dotnet/musl/linux-musl-x64/OpenTelemetry.AutoInstrumentation.Native.so",
+        dotnet_values.coreclr_profiler_path,
+    );
+    try testing.expectEqualStrings(
+        "/usr/lib/opentelemetry/dotnet/musl/AdditionalDeps",
+        dotnet_values.additional_deps orelse return error.Unexpected,
+    );
+    try testing.expectEqualStrings(
+        "/usr/lib/opentelemetry/dotnet/musl",
+        dotnet_values.otel_auto_home,
+    );
+    try testing.expectEqualStrings(
+        "/usr/lib/opentelemetry/dotnet/musl/store",
+        dotnet_values.shared_store orelse return error.Unexpected,
+    );
+    try testing.expectEqualStrings(
+        "/usr/lib/opentelemetry/dotnet/musl/net/OpenTelemetry.AutoInstrumentation.StartupHook.dll",
+        dotnet_values.startup_hooks,
+    );
+}
+
+test "determineDotnetValues: should return values for musl/arm64" {
+    const allocator = testing.allocator;
+    const path =
+        try std.fmt.allocPrint(allocator, "/usr/lib/opentelemetry/dotnet", .{});
+    defer allocator.free(path);
+
+    const dotnet_values =
+        try determineDotnetValues(
+            allocator,
+            path,
+            .MUSL,
+            .aarch64,
+        );
+    defer dotnet_values.freeAll(allocator);
+
+    try testing.expectEqualStrings(
+        coreclr_enable_profiling_value,
+        dotnet_values.coreclr_enable_profiling,
+    );
+    try testing.expectEqualStrings(
+        coreclr_profiler_value,
+        dotnet_values.coreclr_profiler,
+    );
+    try testing.expectEqualStrings(
+        "/usr/lib/opentelemetry/dotnet/musl/linux-musl-arm64/OpenTelemetry.AutoInstrumentation.Native.so",
+        dotnet_values.coreclr_profiler_path,
+    );
+    try testing.expectEqualStrings(
+        "/usr/lib/opentelemetry/dotnet/musl/AdditionalDeps",
+        dotnet_values.additional_deps orelse return error.Unexpected,
+    );
+    try testing.expectEqualStrings(
+        "/usr/lib/opentelemetry/dotnet/musl",
+        dotnet_values.otel_auto_home,
+    );
+    try testing.expectEqualStrings(
+        "/usr/lib/opentelemetry/dotnet/musl/store",
+        dotnet_values.shared_store orelse return error.Unexpected,
+    );
+    try testing.expectEqualStrings(
+        "/usr/lib/opentelemetry/dotnet/musl/net/OpenTelemetry.AutoInstrumentation.StartupHook.dll",
+        dotnet_values.startup_hooks,
+    );
+}
+
+/// Only used for unit tests.
+fn _resetState() void {
+    cached_dotnet_values = CachedDotnetValues{
+        .values = null,
+        .done = false,
+    };
+    libc_info = null;
+}

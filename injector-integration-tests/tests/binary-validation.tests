@@ -1,0 +1,34 @@
+# shellcheck shell=sh
+
+# Copyright The OpenTelemetry Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# Binary validation tests that check the injector binary for correctness.
+# These tests validate ELF binary properties rather than runtime behavior.
+
+# Note: These tests use a dedicated binary validation container with binutils for readelf.
+
+# Verify the injector binary has no weak dynamic symbols.
+# Weak symbols can cause issues with symbol resolution and should not be present.
+run_test_case \
+  "no weak dynamic symbols" \
+  "app" \
+  "./main.sh check_no_weak_dynamic_symbols" \
+  "test no weak dynamic symbols successful"
+
+# Verify the injector binary has no global undefined dynamic symbols.
+# Global undefined symbols indicate missing dependencies that should be resolved at link time.
+run_test_case \
+  "no global undefined dynamic symbols" \
+  "app" \
+  "./main.sh check_no_global_undefined_symbols" \
+  "test no global undefined dynamic symbols successful"
+
+# Verify the injector binary has exactly one dynamic symbol entry (the compulsory null symbol).
+# Every ELF file must have a null symbol as the first entry in .dynsym. This test ensures
+# no other dynamic symbols are exposed, which is required for a fully static injector binary.
+run_test_case \
+  "dynsym golden signature" \
+  "app" \
+  "./main.sh check_dynsym_golden_signature" \
+  "test dynsym golden signature successful"
