@@ -7,10 +7,7 @@
 
 include /usr/share/dpkg/architecture.mk
 
-# The orig tarball unpacks to opentelemetry-injector-<version>/upstream/.
-# All upstream artifacts are already present there — no network access needed.
-ORIG_UPSTREAM := $(CURDIR)/upstream
-PACKAGING     := $(CURDIR)/debian/packaging
+PACKAGING := $(CURDIR)/debian/packaging
 
 %:
 	dh $@
@@ -31,13 +28,13 @@ override_dh_auto_build:
 	ln -sf /usr/bin/zig0.15 $(ZIG_WRAPPER_DIR)/zig
 	PATH=$(ZIG_WRAPPER_DIR):$(PATH) \
 	ZIG_GLOBAL_CACHE_DIR=$(CURDIR)/.zig-cache \
-	    $(MAKE) -C $(ORIG_UPSTREAM)/injector ARCH=amd64
+	    $(MAKE) -C $(CURDIR) ARCH=amd64
 
 # Run the injector unit tests during the build (Debian best practice).
 override_dh_auto_test:
 	PATH=$(ZIG_WRAPPER_DIR):$(PATH) \
 	ZIG_GLOBAL_CACHE_DIR=$(CURDIR)/.zig-cache \
-	    $(MAKE) -C $(ORIG_UPSTREAM)/injector zig-unit-tests
+	    $(MAKE) -C $(CURDIR) zig-unit-tests
 
 # Stage all files into debian/tmp/ for dh_install to split into packages.
 # This runs after dh_prep (which wipes debian/tmp), so files survive into
@@ -47,7 +44,7 @@ override_dh_auto_install:
 	# --- injector (built from source) ---
 	install -d $(CURDIR)/debian/tmp/usr/lib/opentelemetry/injector
 	install -m 0755 \
-	    $(ORIG_UPSTREAM)/injector/so/libotelinject.so \
+	    $(CURDIR)/so/libotelinject.so \
 	    $(CURDIR)/debian/tmp/usr/lib/opentelemetry/injector/libotelinject.so
 
 	# --- config files ---

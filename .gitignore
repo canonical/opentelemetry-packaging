@@ -1,9 +1,0 @@
-debian/files
-debian/tmp/
-debian/.debhelper/
-debian/debhelper-build-stamp
-debian/*.debhelper.log
-debian/*.substvars
-debian/opentelemetry-injector/
-upstream/
-build/
