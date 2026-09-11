@@ -1,28 +1,89 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: opentelemetry-injector
-Upstream-Contact: OpenTelemetry Packaging SIG <opentelemetry-packaging@TODO>
-Source: https://github.com/canonical/opentelemetry-packaging
-Comment:
- This source package contains packaging scripts and configuration files
- authored by Canonical.  At build time it builds the injector from source
- using the Zig toolchain.
+Source: https://github.com/open-telemetry/opentelemetry-injector
 
 Files: *
-Copyright: 2026 Canonical Ltd.
+Copyright: The OpenTelemetry Authors
+License: Apache-2.0
+
+Files: .github/workflows/scripts/*
+       LICENSE
+       build.zig
+       build.zig.zon
+       injector-integration-tests/apps/binary-validation/*
+       injector-integration-tests/apps/copy-reloc/*
+       injector-integration-tests/apps/dotnet/Dockerfile
+       injector-integration-tests/apps/dotnet/app/App.cs
+       injector-integration-tests/apps/empty-gnu-hash-bucket/Dockerfile
+       injector-integration-tests/apps/empty-gnu-hash-bucket/printenv.c
+       injector-integration-tests/apps/jvm/Dockerfile
+       injector-integration-tests/apps/jvm/app/*
+       injector-integration-tests/apps/jvm/no-op-agent/pom.xml
+       injector-integration-tests/apps/jvm/pom.xml
+       injector-integration-tests/apps/no-getenv-symbol/Dockerfile
+       injector-integration-tests/apps/no-getenv-symbol/main.go
+       injector-integration-tests/apps/no-libdl/*
+       injector-integration-tests/apps/nodejs/*
+       injector-integration-tests/apps/python/Dockerfile
+       injector-integration-tests/apps/python/app.py
+       injector-integration-tests/apps/ruby/*
+       injector-integration-tests/common/injector.conf
+       injector-integration-tests/common/injector.custom-location.conf
+       injector-integration-tests/common/injector.exclude-nogetenv.conf
+       injector-integration-tests/scripts/*
+       injector-integration-tests/tests/binary-validation.tests
+       injector-integration-tests/tests/copy-reloc.tests
+       injector-integration-tests/tests/default.tests
+       injector-integration-tests/tests/dotnet.tests
+       injector-integration-tests/tests/empty-gnu-hash-bucket.tests
+       injector-integration-tests/tests/jvm.tests
+       injector-integration-tests/tests/no-libdl.tests
+       injector-integration-tests/tests/nodejs.tests
+       injector-integration-tests/tests/python.tests
+       injector-integration-tests/tests/ruby.tests
+       injector-integration-tests/tests/sdk-cannot-be-accessed.tests
+       injector-integration-tests/tests/sdk-does-not-exist.tests
+       src/args_parser.zig
+       src/config.zig
+       src/dotnet.zig
+       src/jvm.zig
+       src/nodejs.zig
+       src/patterns_matcher.zig
+       src/patterns_util.zig
+       src/print.zig
+       src/proc_self_environ_parser.zig
+       src/proc_self_environ_values.zig
+       src/python.zig
+       src/resource_attributes.zig
+       src/resource_attributes_test.zig
+       src/root.zig
+       src/ruby.zig
+       src/test.zig
+       src/test_util.zig
+       src/types.zig
+       tooling/nextversion/main.go
+       tooling/nextversion/main_test.go
+       tooling/nextversion/nextversion.go
+       tooling/nextversion/nextversion_test.go
+       unit-test-assets/proc-self-auxv/recreate-proc-self-auxv.sh
+       unit-test-assets/proc-self-environ/recreate-proc-self-environ-files.sh
+       unit-test-assets/proc-self-maps/recreate-proc-self-maps.sh
+Copyright: 2025, Dash0 Inc
+           The OpenTelemetry Authors
 License: Apache-2.0
 
 Files: debian/*
-Copyright: 2026 Canonical Ltd.
+Copyright: 2026, Canonical Ltd
+License: Apache-2.0
+
+Files: debian/opentelemetry-injector.postinst
+       debian/opentelemetry-injector.prerm
+       debian/packaging/common/scripts/*
+       debian/rules
+Copyright: 2026, Canonical Ltd
+           The OpenTelemetry Authors
 License: Apache-2.0
 
 License: Apache-2.0
  On Debian systems, the full text of the Apache License, Version 2.0
  can be found in the file `/usr/share/common-licenses/Apache-2.0'.
-
-# ---------------------------------------------------------------------------
-# Bundled upstream components (built from source at package build time)
-# ---------------------------------------------------------------------------
-#
-# opentelemetry-injector (libotelinject.so)
-#   Source:  https://github.com/open-telemetry/opentelemetry-injector
-#   License: Apache-2.0
