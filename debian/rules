@@ -48,7 +48,6 @@ override_dh_auto_install:
 	    $(CURDIR)/debian/tmp/usr/lib/opentelemetry/injector/libotelinject.so
 
 	# --- config files ---
-	install -d $(CURDIR)/debian/tmp/etc/opentelemetry/injector/conf.d
 	install -m 0644 $(PACKAGING)/common/injector/injector.conf \
 	    $(CURDIR)/debian/tmp/etc/opentelemetry/injector/injector.conf
 	install -m 0644 $(PACKAGING)/common/injector/default_env.conf \
