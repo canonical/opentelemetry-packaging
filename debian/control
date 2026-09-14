@@ -26,7 +26,6 @@ Description: OpenTelemetry LD_PRELOAD-based automatic instrumentation injector
  files under /etc/opentelemetry/injector/conf.d/.
  .
  This package provides generation 1 of the injector configuration API
- (opentelemetry-injector1).
+ (opentelemetry-injector1) for plugins to depend on.
  If a future release breaks the conf.d contract it will provide
- opentelemetry-injector2 instead, and the package manager will block
- incompatible upgrades automatically.
+ opentelemetry-injector2 instead.
