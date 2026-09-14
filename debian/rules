@@ -60,3 +60,8 @@ override_dh_auto_install:
 	    $(CURDIR)/debian/tmp/usr/share/opentelemetry-injector/postinstall-injector.sh
 	install -m 0755 $(PACKAGING)/common/scripts/preuninstall-injector.sh \
 	    $(CURDIR)/debian/tmp/usr/share/opentelemetry-injector/preuninstall-injector.sh
+
+# Clean up the zig wrapper directory created during build.
+override_dh_clean:
+	rm -rf $(ZIG_WRAPPER_DIR)
+	dh_clean
