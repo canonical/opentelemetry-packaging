@@ -7,7 +7,7 @@ Build-Depends:
  debhelper-compat (= 13),
  zig0.15,
 Standards-Version: 4.6.2
-Homepage: https://github.com/canonical/opentelemetry-packaging
+Homepage: https://github.com/open-telemetry/opentelemetry-injector
 Vcs-Browser: https://github.com/canonical/opentelemetry-packaging
 Vcs-Git: https://github.com/canonical/opentelemetry-packaging.git
 
