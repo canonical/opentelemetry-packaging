@@ -11,12 +11,15 @@
 
 Test-Command: test -f /usr/lib/opentelemetry/injector/libotelinject.so && test -f /etc/opentelemetry/injector/injector.conf && test -f /etc/opentelemetry/injector/default_env.conf && test -d /etc/opentelemetry/injector/conf.d
 Depends: opentelemetry-injector
+Restrictions: superficial
 
 Test-Command: grep -q /usr/lib/opentelemetry/injector/libotelinject.so /etc/ld.so.preload
 Depends: opentelemetry-injector
+Restrictions: superficial
 
 Test-Command: objdump -f /usr/lib/opentelemetry/injector/libotelinject.so
 Depends: opentelemetry-injector, binutils
+Restrictions: superficial
 
 # ---------------------------------------------------------------------------
 # Lifecycle tests
