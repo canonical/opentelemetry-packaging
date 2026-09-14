@@ -7,7 +7,6 @@ Copyright: The OpenTelemetry Authors
 License: Apache-2.0
 
 Files: .github/workflows/scripts/*
-       LICENSE
        build.zig
        build.zig.zon
        injector-integration-tests/apps/binary-validation/*
