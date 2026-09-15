@@ -1,0 +1,3 @@
+# The injector library intentionally does not link against glibc so it can
+# be injected into processes regardless of their libc implementation.
+opentelemetry-injector: shared-library-lacks-prerequisites

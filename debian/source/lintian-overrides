@@ -1,0 +1,13 @@
+# These are ELF test fixtures used by the Zig unit tests to verify libc
+# detection. They are prebuilt binaries because they must be valid ELF
+# executables for specific architectures and libc combinations (glibc/musl,
+# arm64/x86_64) that cannot be cross-compiled during the Debian package build.
+# The source for generating them is documented in the upstream repository.
+opentelemetry-injector source: source-is-missing
+opentelemetry-injector source: source-contains-prebuilt-binary
+
+# GitHub does not provide detached OpenPGP signatures alongside release
+# archives, and the upstream project uses GitHub's verified tag signatures
+# (visible on the tags page) rather than a separate signing workflow.
+opentelemetry-injector source: debian-watch-does-not-check-openpgp-signature
+

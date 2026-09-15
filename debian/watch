@@ -1,3 +1,4 @@
-version=4
-opts=filenamemangle=s/.+\/v?(\d\S*)\.tar\.gz/opentelemetry-injector-$1.tar.gz/ \
-  https://github.com/open-telemetry/opentelemetry-injector/tags .*/v?(\d\S*)\.tar\.gz
+Version: 5
+Template: GitHub
+Owner: open-telemetry
+Project: opentelemetry-injector

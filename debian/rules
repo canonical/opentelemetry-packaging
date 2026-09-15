@@ -32,9 +32,13 @@ override_dh_auto_build:
 
 # Run the injector unit tests during the build (Debian best practice).
 override_dh_auto_test:
+ifneq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+	@echo "Tests skipped due to DEB_BUILD_OPTIONS=nocheck"
+else
 	PATH=$(ZIG_WRAPPER_DIR):$(PATH) \
 	ZIG_GLOBAL_CACHE_DIR=$(CURDIR)/.zig-cache \
 	    $(MAKE) -C $(CURDIR) zig-unit-tests
+endif
 
 # Stage all files into debian/tmp/ for dh_install to split into packages.
 # This runs after dh_prep (which wipes debian/tmp), so files survive into
@@ -48,6 +52,7 @@ override_dh_auto_install:
 	    $(CURDIR)/debian/tmp/usr/lib/opentelemetry/injector/libotelinject.so
 
 	# --- config files ---
+	install -d $(CURDIR)/debian/tmp/etc/opentelemetry/injector/conf.d
 	install -m 0644 $(PACKAGING)/common/injector/injector.conf \
 	    $(CURDIR)/debian/tmp/etc/opentelemetry/injector/injector.conf
 	install -m 0644 $(PACKAGING)/common/injector/default_env.conf \
