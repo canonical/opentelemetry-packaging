@@ -11,6 +11,3 @@ opentelemetry-injector source: source-contains-prebuilt-binary
 # (visible on the tags page) rather than a separate signing workflow.
 opentelemetry-injector source: debian-watch-does-not-check-openpgp-signature
 
-# The filenamemangle is intentional and correct for this package's naming
-# convention; mode=fast is already set for symlink behavior.
-opentelemetry-injector source: prefer-uscan-symlink
